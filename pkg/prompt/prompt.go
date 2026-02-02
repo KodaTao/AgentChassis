@@ -4,6 +4,7 @@ package prompt
 import (
 	"bytes"
 	"text/template"
+	"time"
 
 	"github.com/KodaTao/AgentChassis/pkg/function"
 	"github.com/KodaTao/AgentChassis/pkg/prompt/templates"
@@ -27,14 +28,19 @@ func NewGenerator() *Generator {
 type TemplateData struct {
 	Functions    []function.FunctionInfo
 	HasFunctions bool
+	CurrentTime  string // 当前时间 (ISO8601 格式)
+	Timezone     string // 时区
 }
 
 // GenerateSystemPrompt 生成完整的系统提示词
 func (g *Generator) GenerateSystemPrompt(functions []function.FunctionInfo) (string, error) {
 	var buf bytes.Buffer
+	now := time.Now()
 	data := TemplateData{
 		Functions:    functions,
 		HasFunctions: len(functions) > 0,
+		CurrentTime:  now.Format(time.RFC3339),
+		Timezone:     now.Location().String(),
 	}
 	if err := g.systemTemplate.Execute(&buf, data); err != nil {
 		return "", err

@@ -1,0 +1,279 @@
+// Package builtin 提供内置的 Function 实现
+package builtin
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"time"
+
+	"github.com/KodaTao/AgentChassis/pkg/function"
+	"github.com/KodaTao/AgentChassis/pkg/scheduler"
+)
+
+// DelayCreateParams 创建延时任务的参数
+type DelayCreateParams struct {
+	Name         string         `json:"name" desc:"任务的唯一名称" required:"true"`
+	FunctionName string         `json:"function_name" desc:"要执行的函数名" required:"true"`
+	RunAt        string         `json:"run_at" desc:"执行时间，ISO8601格式，如 2024-01-15T10:30:00+08:00" required:"true"`
+	Params       map[string]any `json:"params" desc:"传递给函数的参数"`
+}
+
+// DelayCreateFunction 创建延时任务的函数
+type DelayCreateFunction struct {
+	scheduler *scheduler.DelayScheduler
+}
+
+// NewDelayCreateFunction 创建 DelayCreateFunction
+func NewDelayCreateFunction(s *scheduler.DelayScheduler) *DelayCreateFunction {
+	return &DelayCreateFunction{scheduler: s}
+}
+
+func (f *DelayCreateFunction) Name() string {
+	return "delay_create"
+}
+
+func (f *DelayCreateFunction) Description() string {
+	return "创建一个延时任务，在指定时间执行指定的函数。任务名称必须唯一，执行时间必须是未来时间点（ISO8601格式）。"
+}
+
+func (f *DelayCreateFunction) ParamsType() reflect.Type {
+	return reflect.TypeOf(DelayCreateParams{})
+}
+
+func (f *DelayCreateFunction) Execute(ctx context.Context, params any) (function.Result, error) {
+	p := params.(DelayCreateParams)
+
+	// 解析时间
+	runAt, err := time.Parse(time.RFC3339, p.RunAt)
+	if err != nil {
+		return function.Result{}, fmt.Errorf("invalid run_at format, expected ISO8601/RFC3339: %v", err)
+	}
+
+	// 创建任务
+	task, err := f.scheduler.CreateTask(p.Name, p.FunctionName, runAt, p.Params)
+	if err != nil {
+		return function.Result{}, err
+	}
+
+	return function.Result{
+		Message: fmt.Sprintf("延时任务 '%s' 创建成功，将在 %s 执行函数 '%s'",
+			task.Name, task.RunAt.Format("2006-01-02 15:04:05"), task.FunctionName),
+		Data: map[string]any{
+			"id":            task.ID,
+			"name":          task.Name,
+			"function_name": task.FunctionName,
+			"run_at":        task.RunAt.Format(time.RFC3339),
+			"status":        task.Status,
+			"params":        p.Params,
+		},
+	}, nil
+}
+
+// DelayListParams 列出延时任务的参数
+type DelayListParams struct {
+	Status string `json:"status" desc:"按状态筛选：pending/running/completed/failed/cancelled/missed，不填则返回所有"`
+	Limit  int    `json:"limit" desc:"返回数量限制，默认50" default:"50"`
+}
+
+// DelayListFunction 列出延时任务的函数
+type DelayListFunction struct {
+	scheduler *scheduler.DelayScheduler
+}
+
+// NewDelayListFunction 创建 DelayListFunction
+func NewDelayListFunction(s *scheduler.DelayScheduler) *DelayListFunction {
+	return &DelayListFunction{scheduler: s}
+}
+
+func (f *DelayListFunction) Name() string {
+	return "delay_list"
+}
+
+func (f *DelayListFunction) Description() string {
+	return "列出延时任务，可按状态筛选。状态包括：pending（待执行）、running（执行中）、completed（已完成）、failed（失败）、cancelled（已取消）、missed（错过执行）"
+}
+
+func (f *DelayListFunction) ParamsType() reflect.Type {
+	return reflect.TypeOf(DelayListParams{})
+}
+
+func (f *DelayListFunction) Execute(ctx context.Context, params any) (function.Result, error) {
+	p := params.(DelayListParams)
+
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var status *scheduler.TaskStatus
+	if p.Status != "" {
+		s := scheduler.TaskStatus(p.Status)
+		// 验证状态值
+		switch s {
+		case scheduler.StatusPending, scheduler.StatusRunning, scheduler.StatusCompleted,
+			scheduler.StatusFailed, scheduler.StatusCancelled, scheduler.StatusMissed:
+			status = &s
+		default:
+			return function.Result{}, fmt.Errorf("invalid status: %s", p.Status)
+		}
+	}
+
+	tasks, err := f.scheduler.ListTasks(status, limit)
+	if err != nil {
+		return function.Result{}, err
+	}
+
+	// 转换为输出格式
+	taskList := make([]map[string]any, len(tasks))
+	for i, task := range tasks {
+		taskList[i] = map[string]any{
+			"id":            task.ID,
+			"name":          task.Name,
+			"function_name": task.FunctionName,
+			"run_at":        task.RunAt.Format(time.RFC3339),
+			"status":        task.Status,
+			"created_at":    task.CreatedAt.Format(time.RFC3339),
+		}
+		if task.ExecutedAt != nil {
+			taskList[i]["executed_at"] = task.ExecutedAt.Format(time.RFC3339)
+		}
+		if task.Error != "" {
+			taskList[i]["error"] = task.Error
+		}
+	}
+
+	message := fmt.Sprintf("找到 %d 个延时任务", len(tasks))
+	if status != nil {
+		message = fmt.Sprintf("找到 %d 个状态为 %s 的延时任务", len(tasks), *status)
+	}
+
+	return function.Result{
+		Message: message,
+		Data: map[string]any{
+			"total": len(tasks),
+			"tasks": taskList,
+		},
+	}, nil
+}
+
+// DelayCancelParams 取消延时任务的参数
+type DelayCancelParams struct {
+	Name string `json:"name" desc:"要取消的任务名称" required:"true"`
+}
+
+// DelayCancelFunction 取消延时任务的函数
+type DelayCancelFunction struct {
+	scheduler *scheduler.DelayScheduler
+}
+
+// NewDelayCancelFunction 创建 DelayCancelFunction
+func NewDelayCancelFunction(s *scheduler.DelayScheduler) *DelayCancelFunction {
+	return &DelayCancelFunction{scheduler: s}
+}
+
+func (f *DelayCancelFunction) Name() string {
+	return "delay_cancel"
+}
+
+func (f *DelayCancelFunction) Description() string {
+	return "取消一个待执行的延时任务。只有状态为 pending 的任务才能被取消。"
+}
+
+func (f *DelayCancelFunction) ParamsType() reflect.Type {
+	return reflect.TypeOf(DelayCancelParams{})
+}
+
+func (f *DelayCancelFunction) Execute(ctx context.Context, params any) (function.Result, error) {
+	p := params.(DelayCancelParams)
+
+	if err := f.scheduler.CancelTask(p.Name); err != nil {
+		return function.Result{}, err
+	}
+
+	return function.Result{
+		Message: fmt.Sprintf("延时任务 '%s' 已取消", p.Name),
+		Data: map[string]any{
+			"name":   p.Name,
+			"status": "cancelled",
+		},
+	}, nil
+}
+
+// DelayGetParams 获取延时任务详情的参数
+type DelayGetParams struct {
+	Name string `json:"name" desc:"任务名称" required:"true"`
+}
+
+// DelayGetFunction 获取延时任务详情的函数
+type DelayGetFunction struct {
+	scheduler *scheduler.DelayScheduler
+}
+
+// NewDelayGetFunction 创建 DelayGetFunction
+func NewDelayGetFunction(s *scheduler.DelayScheduler) *DelayGetFunction {
+	return &DelayGetFunction{scheduler: s}
+}
+
+func (f *DelayGetFunction) Name() string {
+	return "delay_get"
+}
+
+func (f *DelayGetFunction) Description() string {
+	return "获取指定延时任务的详细信息"
+}
+
+func (f *DelayGetFunction) ParamsType() reflect.Type {
+	return reflect.TypeOf(DelayGetParams{})
+}
+
+func (f *DelayGetFunction) Execute(ctx context.Context, params any) (function.Result, error) {
+	p := params.(DelayGetParams)
+
+	task, err := f.scheduler.GetTask(p.Name)
+	if err != nil {
+		return function.Result{}, err
+	}
+
+	data := map[string]any{
+		"id":            task.ID,
+		"name":          task.Name,
+		"function_name": task.FunctionName,
+		"run_at":        task.RunAt.Format(time.RFC3339),
+		"status":        task.Status,
+		"params":        task.Params,
+		"created_at":    task.CreatedAt.Format(time.RFC3339),
+		"updated_at":    task.UpdatedAt.Format(time.RFC3339),
+	}
+
+	if task.ExecutedAt != nil {
+		data["executed_at"] = task.ExecutedAt.Format(time.RFC3339)
+	}
+	if task.Result != "" {
+		data["result"] = task.Result
+	}
+	if task.Error != "" {
+		data["error"] = task.Error
+	}
+
+	statusDesc := ""
+	switch task.Status {
+	case scheduler.StatusPending:
+		statusDesc = fmt.Sprintf("任务将在 %s 执行", task.RunAt.Format("2006-01-02 15:04:05"))
+	case scheduler.StatusRunning:
+		statusDesc = "任务正在执行中"
+	case scheduler.StatusCompleted:
+		statusDesc = "任务已完成"
+	case scheduler.StatusFailed:
+		statusDesc = fmt.Sprintf("任务执行失败: %s", task.Error)
+	case scheduler.StatusCancelled:
+		statusDesc = "任务已取消"
+	case scheduler.StatusMissed:
+		statusDesc = "任务错过执行（服务重启时已过期）"
+	}
+
+	return function.Result{
+		Message: fmt.Sprintf("任务 '%s' 的状态: %s", task.Name, statusDesc),
+		Data:    data,
+	}, nil
+}

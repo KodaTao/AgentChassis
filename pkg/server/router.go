@@ -9,6 +9,7 @@ import (
 
 	"github.com/KodaTao/AgentChassis/pkg/chassis"
 	"github.com/KodaTao/AgentChassis/pkg/observability"
+	scheduler_pkg "github.com/KodaTao/AgentChassis/pkg/scheduler"
 )
 
 // Server HTTP 服务器
@@ -74,6 +75,12 @@ func (s *Server) setupRoutes() {
 		// Session 管理
 		v1.GET("/sessions", s.listSessions)
 		v1.DELETE("/sessions/:id", s.deleteSession)
+
+		// 延时任务管理
+		v1.GET("/delay-tasks", s.listDelayTasks)
+		v1.POST("/delay-tasks", s.createDelayTask)
+		v1.GET("/delay-tasks/:name", s.getDelayTask)
+		v1.DELETE("/delay-tasks/:name", s.cancelDelayTask)
 	}
 }
 
@@ -181,6 +188,146 @@ func (s *Server) deleteSession(c *gin.Context) {
 			"error": "Session not found: " + id,
 		})
 	}
+}
+
+// CreateDelayTaskRequest 创建延时任务请求
+type CreateDelayTaskRequest struct {
+	Name         string         `json:"name" binding:"required"`
+	FunctionName string         `json:"function_name" binding:"required"`
+	RunAt        string         `json:"run_at" binding:"required"` // ISO8601 格式
+	Params       map[string]any `json:"params"`
+}
+
+// 列出延时任务
+func (s *Server) listDelayTasks(c *gin.Context) {
+	scheduler := s.app.GetDelayScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "DelayScheduler not initialized",
+		})
+		return
+	}
+
+	// 获取查询参数
+	statusStr := c.Query("status")
+	var status *scheduler_pkg.TaskStatus
+	if statusStr != "" {
+		st := scheduler_pkg.TaskStatus(statusStr)
+		status = &st
+	}
+
+	tasks, err := scheduler.ListTasks(status, 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to list tasks: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tasks": tasks,
+		"count": len(tasks),
+	})
+}
+
+// 创建延时任务
+func (s *Server) createDelayTask(c *gin.Context) {
+	scheduler := s.app.GetDelayScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "DelayScheduler not initialized",
+		})
+		return
+	}
+
+	var req CreateDelayTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	// 解析时间
+	runAt, err := time.Parse(time.RFC3339, req.RunAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid run_at format, expected ISO8601/RFC3339: " + err.Error(),
+		})
+		return
+	}
+
+	// 创建任务
+	task, err := scheduler.CreateTask(req.Name, req.FunctionName, runAt, req.Params)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrTaskExists {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, task)
+}
+
+// 获取延时任务详情
+func (s *Server) getDelayTask(c *gin.Context) {
+	scheduler := s.app.GetDelayScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "DelayScheduler not initialized",
+		})
+		return
+	}
+
+	name := c.Param("name")
+	task, err := scheduler.GetTask(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrTaskNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// 取消延时任务
+func (s *Server) cancelDelayTask(c *gin.Context) {
+	scheduler := s.app.GetDelayScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "DelayScheduler not initialized",
+		})
+		return
+	}
+
+	name := c.Param("name")
+	err := scheduler.CancelTask(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrTaskNotFound {
+			status = http.StatusNotFound
+		} else if err == scheduler_pkg.ErrTaskNotPending {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Task cancelled successfully",
+		"name":    name,
+	})
 }
 
 // LoggerMiddleware 日志中间件

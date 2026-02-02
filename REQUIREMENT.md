@@ -146,48 +146,144 @@ files[2]{name,size,deleted}:
   - 比 JSON 节省约 40% Token
   - 支持与 JSON 无损转换
 
-### 2.4 Cron 定时任务
+### 2.4 定时任务系统
 
-#### 2.4.1 功能要求
-- AI 可通过内置 Function 动态创建/查询/删除定时任务
-- 任务持久化到本地文件（SQLite 或 JSON）
-- 重启后自动恢复所有定时任务
+定时任务分为两种类型：
+1. **DelayTask（一次性延时任务）**：在指定时间点执行一次
+2. **CronTask（重复性定时任务）**：按 Cron 表达式周期执行
 
-#### 2.4.2 内置 Cron Function
+#### 2.4.1 DelayTask（一次性延时任务）
+
+##### 功能要求
+- AI 可通过内置 Function 动态创建/查询/取消延时任务
+- 任务持久化到 SQLite，重启后自动恢复
+- 已过期未执行的任务标记为 `missed` 状态
+- 保留已完成任务的历史记录
+
+##### 数据模型
 ```go
-// 创建定时任务
-type CreateCronParams struct {
-    Name     string `json:"name" desc:"任务名称" required:"true"`
-    Cron     string `json:"cron" desc:"Cron 表达式，如 '0 9 * * *'" required:"true"`
+type DelayTask struct {
+    gorm.Model
+    Name         string     `gorm:"uniqueIndex;not null"` // 任务名称（唯一标识）
+    RunAt        time.Time  `gorm:"not null;index"`       // 执行时间点（绝对时间）
+    FunctionName string     `gorm:"not null"`             // 要执行的函数名
+    Params       string     `gorm:"type:text"`            // 函数参数（JSON 格式）
+    Status       string     `gorm:"default:pending"`      // pending/running/completed/failed/cancelled/missed
+    Result       string     `gorm:"type:text"`            // 执行结果
+    Error        string     `gorm:"type:text"`            // 错误信息
+    ExecutedAt   *time.Time                               // 实际执行时间
+}
+```
+
+##### 状态流转
+```
+pending -> running -> completed
+                   -> failed
+pending -> cancelled（手动取消）
+pending -> missed（重启时已过期）
+```
+
+##### 内置 Function
+
+**消息发送函数** - 通用外部通知函数，可直接调用或被延时任务调用
+```go
+// 发送消息
+type SendMessageParams struct {
+    To      string `json:"to" desc:"接收者（人名、邮箱、手机号等）" required:"true"`
+    Message string `json:"message" desc:"消息内容" required:"true"`
+    Channel string `json:"channel" desc:"通知渠道：console（默认）/email/sms/wechat" default:"console"`
+}
+```
+
+**延时任务管理函数**
+```go
+// 创建延时任务
+type DelayCreateParams struct {
+    Name     string `json:"name" desc:"任务名称，唯一标识" required:"true"`
+    RunAt    string `json:"run_at" desc:"执行时间，ISO8601格式，如 2024-12-25T09:00:00+08:00" required:"true"`
     Function string `json:"function" desc:"要执行的函数名" required:"true"`
-    Params   string `json:"params" desc:"函数参数（TOON 格式）"`
+    Params   string `json:"params" desc:"函数参数，JSON格式"`
 }
 
-// 查询定时任务
-type ListCronParams struct {
+// 列出延时任务
+type DelayListParams struct {
+    Status string `json:"status" desc:"按状态筛选：pending/completed/failed/cancelled/missed"`
+}
+
+// 取消延时任务
+type DelayCancelParams struct {
+    Name string `json:"name" desc:"要取消的任务名称" required:"true"`
+}
+```
+
+##### 重启恢复逻辑
+1. 启动时查询所有 `pending` 状态的任务
+2. 检查 `run_at` 是否已过期：
+   - 已过期：更新状态为 `missed`
+   - 未过期：使用 `time.AfterFunc` 重新注册
+
+#### 2.4.2 CronTask（重复性定时任务）
+
+##### 功能要求
+- AI 可通过内置 Function 动态创建/查询/删除定时任务
+- 任务持久化到 SQLite，重启后自动恢复
+- 支持失效时间（until）和最大执行次数（max_runs）
+
+##### 数据模型
+```go
+type CronTask struct {
+    gorm.Model
+    Name         string     `gorm:"uniqueIndex;not null"` // 任务名称
+    CronExpr     string     `gorm:"not null"`             // Cron 表达式
+    FunctionName string     `gorm:"not null"`             // 要执行的函数
+    Params       string     `gorm:"type:text"`            // 参数（JSON 格式）
+    Enabled      bool       `gorm:"default:true"`         // 是否启用
+    Until        *time.Time                               // 失效时间（可选）
+    MaxRuns      int        `gorm:"default:0"`            // 最大执行次数，0表示无限
+    RunCount     int        `gorm:"default:0"`            // 已执行次数
+    LastRunAt    *time.Time                               // 最后执行时间
+    LastStatus   string                                   // 最后执行状态
+}
+```
+
+##### 内置 Function
+```go
+// 创建定时任务
+type CronCreateParams struct {
+    Name     string `json:"name" desc:"任务名称" required:"true"`
+    CronExpr string `json:"cron_expr" desc:"Cron 表达式，如 '0 9 * * *'" required:"true"`
+    Function string `json:"function" desc:"要执行的函数名" required:"true"`
+    Params   string `json:"params" desc:"函数参数（JSON 格式）"`
+    Until    string `json:"until" desc:"失效时间，ISO8601格式（可选）"`
+    MaxRuns  int    `json:"max_runs" desc:"最大执行次数，0表示无限（可选）"`
+}
+
+// 列出定时任务
+type CronListParams struct {
     Name string `json:"name" desc:"按名称筛选（可选）"`
 }
 
 // 删除定时任务
-type DeleteCronParams struct {
+type CronDeleteParams struct {
     Name string `json:"name" desc:"要删除的任务名称" required:"true"`
 }
 ```
 
 #### 2.4.3 持久化方案
 - 使用 **GORM + SQLite**（`~/.agentchassis/data.db`）
-- Cron 任务表结构：
-```go
-type CronTask struct {
-    gorm.Model
-    Name         string `gorm:"uniqueIndex;not null"`
-    CronExpr     string `gorm:"not null"`          // Cron 表达式
-    FunctionName string `gorm:"not null"`          // 要执行的函数
-    Params       string `gorm:"type:text"`         // 参数（TOON 格式）
-    Enabled      bool   `gorm:"default:true"`      // 是否启用
-    LastRunAt    *time.Time                        // 最后执行时间
-    LastStatus   string                            // 最后执行状态
-}
+- DelayTask 和 CronTask 使用独立的表
+
+#### 2.4.4 REST API
+```
+# 延时任务
+GET    /api/v1/delays            # 获取所有延时任务
+POST   /api/v1/delays            # 创建延时任务
+DELETE /api/v1/delays/:name      # 取消延时任务
+
+# 定时任务
+GET    /api/v1/crons             # 获取所有定时任务
+POST   /api/v1/crons             # 创建定时任务
+DELETE /api/v1/crons/:name       # 删除定时任务
 ```
 
 ### 2.5 可观测性
@@ -421,3 +517,4 @@ AgentChassis/
 | 日期 | 版本 | 说明 |
 |------|------|------|
 | 2024-XX-XX | v0.1 | 初始版本，确定核心需求 |
+| 2024-XX-XX | v0.2 | 完善定时任务系统设计：区分 DelayTask（一次性）和 CronTask（重复性） |

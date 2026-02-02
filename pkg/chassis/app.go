@@ -3,21 +3,25 @@ package chassis
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/KodaTao/AgentChassis/pkg/function"
+	"github.com/KodaTao/AgentChassis/pkg/function/builtin"
 	"github.com/KodaTao/AgentChassis/pkg/llm"
 	"github.com/KodaTao/AgentChassis/pkg/llm/openai"
 	"github.com/KodaTao/AgentChassis/pkg/observability"
+	"github.com/KodaTao/AgentChassis/pkg/scheduler"
 	"github.com/KodaTao/AgentChassis/pkg/storage"
 )
 
 // App AgentChassis 应用实例
 // 这是整个框架的入口点
 type App struct {
-	config   *Config
-	registry *function.Registry
-	agent    *Agent
-	provider llm.Provider
+	config         *Config
+	registry       *function.Registry
+	agent          *Agent
+	provider       llm.Provider
+	delayScheduler *scheduler.DelayScheduler
 }
 
 // New 创建新的 App 实例
@@ -101,7 +105,20 @@ func (a *App) Initialize() error {
 		"api_key", llm.MaskAPIKey(apiKey),
 	)
 
-	// 4. 创建 Agent
+	// 4. 初始化 DelayScheduler
+	db := storage.GetDB()
+	logger := slog.Default()
+	a.delayScheduler = scheduler.NewDelayScheduler(db, a.registry, logger)
+	if err := a.delayScheduler.Start(); err != nil {
+		return fmt.Errorf("failed to start delay scheduler: %w", err)
+	}
+
+	observability.Info("DelayScheduler started")
+
+	// 5. 注册内置调度函数
+	a.registerBuiltinSchedulerFunctions()
+
+	// 6. 创建 Agent
 	a.agent = NewAgent(a.provider, a.registry, nil)
 
 	observability.Info("AgentChassis initialized",
@@ -109,6 +126,22 @@ func (a *App) Initialize() error {
 	)
 
 	return nil
+}
+
+// registerBuiltinSchedulerFunctions 注册内置函数
+func (a *App) registerBuiltinSchedulerFunctions() {
+	// 注册消息发送函数（通用的外部通知函数，可直接调用或被延时任务调用）
+	_ = a.registry.Register(builtin.NewSendMessageFunction())
+
+	// 注册延时任务管理函数
+	_ = a.registry.Register(builtin.NewDelayCreateFunction(a.delayScheduler))
+	_ = a.registry.Register(builtin.NewDelayListFunction(a.delayScheduler))
+	_ = a.registry.Register(builtin.NewDelayCancelFunction(a.delayScheduler))
+	_ = a.registry.Register(builtin.NewDelayGetFunction(a.delayScheduler))
+
+	observability.Info("Registered builtin functions",
+		"functions", []string{"send_message", "delay_create", "delay_list", "delay_cancel", "delay_get"},
+	)
 }
 
 // GetAgent 获取 Agent 实例
@@ -135,6 +168,11 @@ func (a *App) GetProvider() llm.Provider {
 func (a *App) Shutdown() error {
 	observability.Info("Shutting down AgentChassis")
 
+	// 停止调度器
+	if a.delayScheduler != nil {
+		a.delayScheduler.Stop()
+	}
+
 	// 关闭数据库
 	if err := storage.Close(); err != nil {
 		observability.Error("Failed to close database", "error", err)
@@ -143,4 +181,9 @@ func (a *App) Shutdown() error {
 
 	observability.Info("AgentChassis shutdown complete")
 	return nil
+}
+
+// GetDelayScheduler 获取延时任务调度器
+func (a *App) GetDelayScheduler() *scheduler.DelayScheduler {
+	return a.delayScheduler
 }

@@ -121,33 +121,56 @@
 - [x] 实现 `GET /api/v1/functions` 列出所有 Function
 - [x] 实现 `GET /api/v1/functions/:name` 获取 Function 详情
 
-### 6.4 Cron 管理 API
+### 6.4 延时任务管理 API ✅
+- [x] 实现 `GET /api/v1/delay-tasks` 列出延时任务
+- [x] 实现 `POST /api/v1/delay-tasks` 创建延时任务
+- [x] 实现 `GET /api/v1/delay-tasks/:name` 获取任务详情
+- [x] 实现 `DELETE /api/v1/delay-tasks/:name` 取消任务
+
+### 6.5 Cron 管理 API（待开发）
 - [ ] 实现 `GET /api/v1/crons` 列出所有定时任务
 - [ ] 实现 `POST /api/v1/crons` 创建定时任务
 - [ ] 实现 `DELETE /api/v1/crons/:name` 删除定时任务
 
 ---
 
-## 阶段七：Cron 定时任务 (Cron)
+## 阶段七：定时任务 (Scheduler) 🔄
 
-### 7.1 数据模型
-- [ ] 定义 CronTask GORM Model (`pkg/cron/model.go`)
-- [ ] 实现 CRUD Repository (`pkg/cron/repository.go`)
+### 7.1 延时任务 (DelayTask) ✅
+- [x] 定义 DelayTask GORM Model (`pkg/scheduler/model.go`)
+- [x] 实现 CRUD Repository (`pkg/scheduler/repository.go`)
+- [x] 实现 DelayScheduler (`pkg/scheduler/delay_scheduler.go`)
+  - [x] 使用 time.AfterFunc 实现调度
+  - [x] 重启恢复：已过期任务标记为 missed
+  - [x] 保留已完成任务历史记录
+- [x] 内置 Function
+  - [x] `send_message` - 发送消息通知（支持多渠道：console/email/sms/wechat）(`pkg/function/builtin/reminder.go`)
+  - [x] `delay_create` - 创建延时任务 (`pkg/function/builtin/delay.go`)
+  - [x] `delay_list` - 列出延时任务
+  - [x] `delay_cancel` - 取消延时任务
+  - [x] `delay_get` - 获取任务详情
+- [x] REST API
+  - [x] `GET /api/v1/delay-tasks` - 列出任务
+  - [x] `POST /api/v1/delay-tasks` - 创建任务
+  - [x] `GET /api/v1/delay-tasks/:name` - 获取任务详情
+  - [x] `DELETE /api/v1/delay-tasks/:name` - 取消任务
+- [x] 系统提示词增强
+  - [x] 添加当前时间信息，支持 AI 计算未来时间
+  - [x] 强调使用用户语言回复
+- [x] 单元测试
 
-### 7.2 调度器
-- [ ] 集成 robfig/cron (`pkg/cron/scheduler.go`)
+### 7.2 Cron 定时任务 (CronTask) - 待开发
+- [ ] 定义 CronTask 调度器 (`pkg/scheduler/cron_scheduler.go`)
+- [ ] 集成 robfig/cron
 - [ ] 支持动态添加/删除任务
 - [ ] 任务执行回调，更新状态
-
-### 7.3 持久化与恢复
 - [ ] 启动时从数据库加载任务
 - [ ] 任务执行后更新 LastRunAt、LastStatus
-
-### 7.4 内置 Cron Functions
-- [ ] 实现 `cron_create` 函数 (`pkg/function/builtin/cron.go`)
-- [ ] 实现 `cron_list` 函数
-- [ ] 实现 `cron_delete` 函数
-- [ ] 集成测试
+- [ ] 内置 Function (`pkg/function/builtin/cron.go`)
+  - [ ] `cron_create` 函数
+  - [ ] `cron_list` 函数
+  - [ ] `cron_delete` 函数
+- [ ] 单元测试
 
 ---
 
@@ -202,7 +225,7 @@
 | **P0** | 阶段四 | LLM 集成 | ✅ 完成 |
 | **P0** | 阶段五 | Agent 核心 | ✅ 完成 |
 | **P0** | 阶段六 | HTTP Server | ✅ 完成 |
-| **P1** | 阶段七 | Cron 定时任务 | 待开发 |
+| **P1** | 阶段七 | 定时任务（DelayTask ✅ / CronTask 待开发） | 🔄 进行中 |
 | **P1** | 阶段八 | CLI 入口 | ✅ 完成 |
 | **P2** | 阶段九 | 可观测性增强 | 待开发 |
 | **P2** | 阶段十 | 示例和文档 | 🔄 进行中 |
