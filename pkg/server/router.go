@@ -3,6 +3,7 @@ package server
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -79,8 +80,15 @@ func (s *Server) setupRoutes() {
 		// 延时任务管理
 		v1.GET("/delay-tasks", s.listDelayTasks)
 		v1.POST("/delay-tasks", s.createDelayTask)
-		v1.GET("/delay-tasks/:name", s.getDelayTask)
-		v1.DELETE("/delay-tasks/:name", s.cancelDelayTask)
+		v1.GET("/delay-tasks/:id", s.getDelayTask)
+		v1.DELETE("/delay-tasks/:id", s.cancelDelayTask)
+
+		// 定时任务管理
+		v1.GET("/crons", s.listCronTasks)
+		v1.POST("/crons", s.createCronTask)
+		v1.GET("/crons/:id", s.getCronTask)
+		v1.DELETE("/crons/:id", s.deleteCronTask)
+		v1.GET("/crons/:id/history", s.getCronTaskHistory)
 	}
 }
 
@@ -216,7 +224,21 @@ func (s *Server) listDelayTasks(c *gin.Context) {
 		status = &st
 	}
 
-	tasks, err := scheduler.ListTasks(status, 100)
+	// 分页参数
+	limit := 20
+	offset := 0
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if o := c.Query("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	tasks, err := scheduler.ListTasks(status, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to list tasks: " + err.Error(),
@@ -224,9 +246,19 @@ func (s *Server) listDelayTasks(c *gin.Context) {
 		return
 	}
 
+	total, err := scheduler.CountTasks(status)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to count tasks: " + err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"tasks": tasks,
-		"count": len(tasks),
+		"tasks":  tasks,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
 	})
 }
 
@@ -260,11 +292,7 @@ func (s *Server) createDelayTask(c *gin.Context) {
 	// 创建任务
 	task, err := scheduler.CreateTask(req.Name, req.FunctionName, runAt, req.Params)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if err == scheduler_pkg.ErrTaskExists {
-			status = http.StatusConflict
-		}
-		c.JSON(status, gin.H{
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})
 		return
@@ -283,8 +311,16 @@ func (s *Server) getDelayTask(c *gin.Context) {
 		return
 	}
 
-	name := c.Param("name")
-	task, err := scheduler.GetTask(name)
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid task ID",
+		})
+		return
+	}
+
+	task, err := scheduler.GetTaskByID(uint(id))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if err == scheduler_pkg.ErrTaskNotFound {
@@ -309,8 +345,16 @@ func (s *Server) cancelDelayTask(c *gin.Context) {
 		return
 	}
 
-	name := c.Param("name")
-	err := scheduler.CancelTask(name)
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid task ID",
+		})
+		return
+	}
+
+	err = scheduler.CancelTaskByID(uint(id))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if err == scheduler_pkg.ErrTaskNotFound {
@@ -326,7 +370,7 @@ func (s *Server) cancelDelayTask(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Task cancelled successfully",
-		"name":    name,
+		"id":      id,
 	})
 }
 
@@ -379,4 +423,234 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// CreateCronTaskRequest 创建定时任务请求
+type CreateCronTaskRequest struct {
+	Name         string         `json:"name" binding:"required"`
+	CronExpr     string         `json:"cron_expr" binding:"required"`
+	FunctionName string         `json:"function_name" binding:"required"`
+	Params       map[string]any `json:"params"`
+	Description  string         `json:"description"`
+}
+
+// 列出定时任务
+func (s *Server) listCronTasks(c *gin.Context) {
+	scheduler := s.app.GetCronScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CronScheduler not initialized",
+		})
+		return
+	}
+
+	// 分页参数
+	limit := 20
+	offset := 0
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if o := c.Query("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	tasks, err := scheduler.ListTasks(limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to list cron tasks: " + err.Error(),
+		})
+		return
+	}
+
+	total, err := scheduler.CountTasks()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to count cron tasks: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tasks":  tasks,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+// 创建定时任务
+func (s *Server) createCronTask(c *gin.Context) {
+	scheduler := s.app.GetCronScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CronScheduler not initialized",
+		})
+		return
+	}
+
+	var req CreateCronTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	// 创建任务
+	task, err := scheduler.CreateTask(req.Name, req.CronExpr, req.FunctionName, req.Params, req.Description)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, task)
+}
+
+// 获取定时任务详情
+func (s *Server) getCronTask(c *gin.Context) {
+	scheduler := s.app.GetCronScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CronScheduler not initialized",
+		})
+		return
+	}
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid task ID",
+		})
+		return
+	}
+
+	task, err := scheduler.GetTaskByID(uint(id))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrCronTaskNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// 删除定时任务
+func (s *Server) deleteCronTask(c *gin.Context) {
+	scheduler := s.app.GetCronScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CronScheduler not initialized",
+		})
+		return
+	}
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid task ID",
+		})
+		return
+	}
+
+	err = scheduler.DeleteTaskByID(uint(id))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrCronTaskNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Cron task deleted successfully",
+		"id":      id,
+	})
+}
+
+// 获取定时任务执行历史
+func (s *Server) getCronTaskHistory(c *gin.Context) {
+	scheduler := s.app.GetCronScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "CronScheduler not initialized",
+		})
+		return
+	}
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid task ID",
+		})
+		return
+	}
+
+	// 先验证任务存在
+	task, err := scheduler.GetTaskByID(uint(id))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == scheduler_pkg.ErrCronTaskNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// 分页参数
+	limit := 20
+	offset := 0
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if o := c.Query("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	executions, err := scheduler.GetExecutionHistory(uint(id), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to get execution history: " + err.Error(),
+		})
+		return
+	}
+
+	total, err := scheduler.CountExecutionHistory(uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to count execution history: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"task_id":    id,
+		"task_name":  task.Name,
+		"executions": executions,
+		"total":      total,
+		"limit":      limit,
+		"offset":     offset,
+	})
 }

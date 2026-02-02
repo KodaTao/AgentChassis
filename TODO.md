@@ -124,17 +124,19 @@
 ### 6.4 延时任务管理 API ✅
 - [x] 实现 `GET /api/v1/delay-tasks` 列出延时任务
 - [x] 实现 `POST /api/v1/delay-tasks` 创建延时任务
-- [x] 实现 `GET /api/v1/delay-tasks/:name` 获取任务详情
-- [x] 实现 `DELETE /api/v1/delay-tasks/:name` 取消任务
+- [x] 实现 `GET /api/v1/delay-tasks/:id` 获取任务详情
+- [x] 实现 `DELETE /api/v1/delay-tasks/:id` 取消任务
 
-### 6.5 Cron 管理 API（待开发）
-- [ ] 实现 `GET /api/v1/crons` 列出所有定时任务
-- [ ] 实现 `POST /api/v1/crons` 创建定时任务
-- [ ] 实现 `DELETE /api/v1/crons/:name` 删除定时任务
+### 6.5 Cron 管理 API ✅
+- [x] 实现 `GET /api/v1/crons` 列出所有定时任务
+- [x] 实现 `POST /api/v1/crons` 创建定时任务
+- [x] 实现 `GET /api/v1/crons/:id` 获取定时任务详情
+- [x] 实现 `DELETE /api/v1/crons/:id` 删除定时任务
+- [x] 实现 `GET /api/v1/crons/:id/history` 获取执行历史
 
 ---
 
-## 阶段七：定时任务 (Scheduler) 🔄
+## 阶段七：定时任务 (Scheduler) ✅
 
 ### 7.1 延时任务 (DelayTask) ✅
 - [x] 定义 DelayTask GORM Model (`pkg/scheduler/model.go`)
@@ -143,6 +145,7 @@
   - [x] 使用 time.AfterFunc 实现调度
   - [x] 重启恢复：已过期任务标记为 missed
   - [x] 保留已完成任务历史记录
+  - [x] 使用 ID 作为唯一标识（Name 可重复）
 - [x] 内置 Function
   - [x] `send_message` - 发送消息通知（支持多渠道：console/email/sms/wechat）(`pkg/function/builtin/reminder.go`)
   - [x] `delay_create` - 创建延时任务 (`pkg/function/builtin/delay.go`)
@@ -150,27 +153,40 @@
   - [x] `delay_cancel` - 取消延时任务
   - [x] `delay_get` - 获取任务详情
 - [x] REST API
-  - [x] `GET /api/v1/delay-tasks` - 列出任务
+  - [x] `GET /api/v1/delay-tasks` - 列出任务（支持分页）
   - [x] `POST /api/v1/delay-tasks` - 创建任务
-  - [x] `GET /api/v1/delay-tasks/:name` - 获取任务详情
-  - [x] `DELETE /api/v1/delay-tasks/:name` - 取消任务
+  - [x] `GET /api/v1/delay-tasks/:id` - 获取任务详情
+  - [x] `DELETE /api/v1/delay-tasks/:id` - 取消任务
 - [x] 系统提示词增强
   - [x] 添加当前时间信息，支持 AI 计算未来时间
   - [x] 强调使用用户语言回复
 - [x] 单元测试
 
-### 7.2 Cron 定时任务 (CronTask) - 待开发
-- [ ] 定义 CronTask 调度器 (`pkg/scheduler/cron_scheduler.go`)
-- [ ] 集成 robfig/cron
-- [ ] 支持动态添加/删除任务
-- [ ] 任务执行回调，更新状态
-- [ ] 启动时从数据库加载任务
-- [ ] 任务执行后更新 LastRunAt、LastStatus
-- [ ] 内置 Function (`pkg/function/builtin/cron.go`)
-  - [ ] `cron_create` 函数
-  - [ ] `cron_list` 函数
-  - [ ] `cron_delete` 函数
-- [ ] 单元测试
+### 7.2 Cron 定时任务 (CronTask) ✅
+- [x] 定义 CronTask 数据模型 (`pkg/scheduler/model.go`)
+  - [x] CronTask 定时任务表
+  - [x] CronExecution 执行历史表
+- [x] 实现 CRUD Repository (`pkg/scheduler/cron_repository.go`)
+- [x] 实现 CronScheduler (`pkg/scheduler/cron_scheduler.go`)
+  - [x] 集成 robfig/cron（支持秒级，6字段格式）
+  - [x] 支持动态添加/删除任务
+  - [x] 每次执行记录历史
+  - [x] 启动时从数据库加载恢复任务
+  - [x] 忽略错过的执行（重启时不补执行）
+  - [x] 支持并发执行
+- [x] 内置 Function (`pkg/function/builtin/cron.go`)
+  - [x] `cron_create` - 创建定时任务
+  - [x] `cron_list` - 列出定时任务
+  - [x] `cron_delete` - 删除定时任务
+  - [x] `cron_get` - 获取定时任务详情
+  - [x] `cron_history` - 获取执行历史
+- [x] REST API
+  - [x] `GET /api/v1/crons` - 列出任务（支持分页）
+  - [x] `POST /api/v1/crons` - 创建任务
+  - [x] `GET /api/v1/crons/:id` - 获取任务详情
+  - [x] `DELETE /api/v1/crons/:id` - 删除任务
+  - [x] `GET /api/v1/crons/:id/history` - 获取执行历史（支持分页）
+- [x] 单元测试
 
 ---
 
@@ -225,7 +241,7 @@
 | **P0** | 阶段四 | LLM 集成 | ✅ 完成 |
 | **P0** | 阶段五 | Agent 核心 | ✅ 完成 |
 | **P0** | 阶段六 | HTTP Server | ✅ 完成 |
-| **P1** | 阶段七 | 定时任务（DelayTask ✅ / CronTask 待开发） | 🔄 进行中 |
+| **P1** | 阶段七 | 定时任务（DelayTask ✅ / CronTask ✅） | ✅ 完成 |
 | **P1** | 阶段八 | CLI 入口 | ✅ 完成 |
 | **P2** | 阶段九 | 可观测性增强 | 待开发 |
 | **P2** | 阶段十 | 示例和文档 | 🔄 进行中 |
@@ -260,3 +276,5 @@
 | 2024-XX-XX | 创建初始开发计划 |
 | 2024-XX-XX | 更新：使用 GORM，初期专注 HTTP Server 模式 |
 | 2024-XX-XX | **MVP 完成**：阶段一到六、阶段八已完成 |
+| 2024-XX-XX | **DelayTask 改进**：使用 ID 作为唯一标识，Name 改为描述性字段 |
+| 2024-XX-XX | **CronTask 完成**：实现定时任务调度功能（秒级精度，执行历史记录） |

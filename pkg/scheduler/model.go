@@ -22,7 +22,7 @@ const (
 // DelayTask 一次性延时任务
 type DelayTask struct {
 	gorm.Model
-	Name         string     `gorm:"uniqueIndex;not null" json:"name"`          // 任务名称（唯一标识）
+	Name         string     `gorm:"not null" json:"name"`                      // 任务名称（描述性，可重复）
 	RunAt        time.Time  `gorm:"not null;index" json:"run_at"`              // 执行时间点（绝对时间）
 	FunctionName string     `gorm:"not null" json:"function_name"`             // 要执行的函数名
 	Params       string     `gorm:"type:text" json:"params,omitempty"`         // 函数参数（JSON 格式）
@@ -57,22 +57,45 @@ func (t *DelayTask) TimeUntilRun() time.Duration {
 	return time.Until(t.RunAt)
 }
 
-// CronTask 重复性定时任务（预留，后续实现）
+// CronTask 重复性定时任务
 type CronTask struct {
 	gorm.Model
-	Name         string     `gorm:"uniqueIndex;not null" json:"name"`    // 任务名称
-	CronExpr     string     `gorm:"not null" json:"cron_expr"`           // Cron 表达式
-	FunctionName string     `gorm:"not null" json:"function_name"`       // 要执行的函数
-	Params       string     `gorm:"type:text" json:"params,omitempty"`   // 参数（JSON 格式）
-	Enabled      bool       `gorm:"default:true" json:"enabled"`         // 是否启用
-	Until        *time.Time `json:"until,omitempty"`                     // 失效时间（可选）
-	MaxRuns      int        `gorm:"default:0" json:"max_runs"`           // 最大执行次数，0表示无限
-	RunCount     int        `gorm:"default:0" json:"run_count"`          // 已执行次数
-	LastRunAt    *time.Time `json:"last_run_at,omitempty"`               // 最后执行时间
-	LastStatus   string     `json:"last_status,omitempty"`               // 最后执行状态
+	Name         string `gorm:"not null" json:"name"`                // 任务名称（描述性，可重复）
+	CronExpr     string `gorm:"not null" json:"cron_expr"`           // Cron 表达式（6字段，支持秒级）
+	FunctionName string `gorm:"not null" json:"function_name"`       // 要执行的函数名
+	Params       string `gorm:"type:text" json:"params,omitempty"`   // 函数参数（JSON 格式）
+	Description  string `gorm:"type:text" json:"description"`        // 任务描述
+	NextRunAt    *time.Time `json:"next_run_at,omitempty"`           // 下次执行时间
 }
 
 // TableName 指定表名
 func (CronTask) TableName() string {
 	return "cron_tasks"
+}
+
+// CronExecutionStatus 定时任务执行状态
+type CronExecutionStatus string
+
+const (
+	CronStatusRunning   CronExecutionStatus = "running"   // 正在执行
+	CronStatusCompleted CronExecutionStatus = "completed" // 执行完成
+	CronStatusFailed    CronExecutionStatus = "failed"    // 执行失败
+)
+
+// CronExecution 定时任务执行历史记录
+type CronExecution struct {
+	gorm.Model
+	CronTaskID  uint                `gorm:"not null;index" json:"cron_task_id"` // 关联的 CronTask ID
+	ScheduledAt time.Time           `gorm:"not null;index" json:"scheduled_at"` // 计划执行时间
+	StartedAt   time.Time           `gorm:"not null" json:"started_at"`         // 开始执行时间
+	FinishedAt  *time.Time          `json:"finished_at,omitempty"`              // 结束时间
+	Status      CronExecutionStatus `gorm:"not null;index" json:"status"`       // 执行状态
+	Result      string              `gorm:"type:text" json:"result,omitempty"`  // 执行结果
+	Error       string              `gorm:"type:text" json:"error,omitempty"`   // 错误信息
+	Duration    int64               `json:"duration_ms,omitempty"`              // 执行耗时（毫秒）
+}
+
+// TableName 指定表名
+func (CronExecution) TableName() string {
+	return "cron_executions"
 }

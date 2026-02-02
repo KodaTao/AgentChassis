@@ -23,19 +23,6 @@ func (r *DelayTaskRepository) Create(task *DelayTask) error {
 	return r.db.Create(task).Error
 }
 
-// GetByName 根据名称获取任务
-func (r *DelayTaskRepository) GetByName(name string) (*DelayTask, error) {
-	var task DelayTask
-	err := r.db.Where("name = ?", name).First(&task).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTaskNotFound
-		}
-		return nil, err
-	}
-	return &task, nil
-}
-
 // GetByID 根据 ID 获取任务
 func (r *DelayTaskRepository) GetByID(id uint) (*DelayTask, error) {
 	var task DelayTask
@@ -54,9 +41,9 @@ func (r *DelayTaskRepository) Update(task *DelayTask) error {
 	return r.db.Save(task).Error
 }
 
-// Delete 删除任务
-func (r *DelayTaskRepository) Delete(name string) error {
-	result := r.db.Where("name = ?", name).Delete(&DelayTask{})
+// DeleteByID 根据 ID 删除任务
+func (r *DelayTaskRepository) DeleteByID(id uint) error {
+	result := r.db.Delete(&DelayTask{}, id)
 	if result.RowsAffected == 0 {
 		return ErrTaskNotFound
 	}
@@ -64,7 +51,7 @@ func (r *DelayTaskRepository) Delete(name string) error {
 }
 
 // List 列出任务
-func (r *DelayTaskRepository) List(status *TaskStatus, limit int) ([]DelayTask, error) {
+func (r *DelayTaskRepository) List(status *TaskStatus, limit, offset int) ([]DelayTask, error) {
 	var tasks []DelayTask
 	query := r.db.Model(&DelayTask{})
 
@@ -76,6 +63,10 @@ func (r *DelayTaskRepository) List(status *TaskStatus, limit int) ([]DelayTask, 
 		query = query.Limit(limit)
 	}
 
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+
 	err := query.Order("run_at ASC").Find(&tasks).Error
 	return tasks, err
 }
@@ -83,16 +74,27 @@ func (r *DelayTaskRepository) List(status *TaskStatus, limit int) ([]DelayTask, 
 // ListPending 列出所有待执行的任务
 func (r *DelayTaskRepository) ListPending() ([]DelayTask, error) {
 	status := StatusPending
-	return r.List(&status, 0)
+	return r.List(&status, 0, 0)
 }
 
 // ListByStatus 根据状态列出任务
 func (r *DelayTaskRepository) ListByStatus(status TaskStatus) ([]DelayTask, error) {
-	return r.List(&status, 0)
+	return r.List(&status, 0, 0)
 }
 
-// UpdateStatus 更新任务状态
-func (r *DelayTaskRepository) UpdateStatus(name string, status TaskStatus, result, errMsg string) error {
+// Count 统计任务数量
+func (r *DelayTaskRepository) Count(status *TaskStatus) (int64, error) {
+	var count int64
+	query := r.db.Model(&DelayTask{})
+	if status != nil {
+		query = query.Where("status = ?", *status)
+	}
+	err := query.Count(&count).Error
+	return count, err
+}
+
+// UpdateStatusByID 根据 ID 更新任务状态
+func (r *DelayTaskRepository) UpdateStatusByID(id uint, status TaskStatus, result, errMsg string) error {
 	updates := map[string]interface{}{
 		"status": status,
 	}
@@ -110,28 +112,28 @@ func (r *DelayTaskRepository) UpdateStatus(name string, status TaskStatus, resul
 		updates["executed_at"] = &now
 	}
 
-	res := r.db.Model(&DelayTask{}).Where("name = ?", name).Updates(updates)
+	res := r.db.Model(&DelayTask{}).Where("id = ?", id).Updates(updates)
 	if res.RowsAffected == 0 {
 		return ErrTaskNotFound
 	}
 	return res.Error
 }
 
-// MarkAsMissed 标记过期任务为 missed
-func (r *DelayTaskRepository) MarkAsMissed(name string) error {
-	return r.UpdateStatus(name, StatusMissed, "", "task missed due to server restart")
+// MarkAsMissedByID 根据 ID 标记过期任务为 missed
+func (r *DelayTaskRepository) MarkAsMissedByID(id uint) error {
+	return r.UpdateStatusByID(id, StatusMissed, "", "task missed due to server restart")
 }
 
-// Cancel 取消任务
-func (r *DelayTaskRepository) Cancel(name string) error {
+// CancelByID 根据 ID 取消任务
+func (r *DelayTaskRepository) CancelByID(id uint) error {
 	res := r.db.Model(&DelayTask{}).
-		Where("name = ? AND status = ?", name, StatusPending).
+		Where("id = ? AND status = ?", id, StatusPending).
 		Update("status", StatusCancelled)
 
 	if res.RowsAffected == 0 {
 		// 检查是否存在
 		var count int64
-		r.db.Model(&DelayTask{}).Where("name = ?", name).Count(&count)
+		r.db.Model(&DelayTask{}).Where("id = ?", id).Count(&count)
 		if count == 0 {
 			return ErrTaskNotFound
 		}
@@ -140,16 +142,8 @@ func (r *DelayTaskRepository) Cancel(name string) error {
 	return res.Error
 }
 
-// Exists 检查任务是否存在
-func (r *DelayTaskRepository) Exists(name string) (bool, error) {
-	var count int64
-	err := r.db.Model(&DelayTask{}).Where("name = ?", name).Count(&count).Error
-	return count > 0, err
-}
-
 // 错误定义
 var (
 	ErrTaskNotFound   = errors.New("task not found")
 	ErrTaskNotPending = errors.New("task is not in pending status")
-	ErrTaskExists     = errors.New("task with this name already exists")
 )

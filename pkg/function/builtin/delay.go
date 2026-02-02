@@ -13,7 +13,7 @@ import (
 
 // DelayCreateParams 创建延时任务的参数
 type DelayCreateParams struct {
-	Name         string         `json:"name" desc:"任务的唯一名称" required:"true"`
+	Name         string         `json:"name" desc:"任务名称（描述性，可重复）" required:"true"`
 	FunctionName string         `json:"function_name" desc:"要执行的函数名" required:"true"`
 	RunAt        string         `json:"run_at" desc:"执行时间，ISO8601格式，如 2024-01-15T10:30:00+08:00" required:"true"`
 	Params       map[string]any `json:"params" desc:"传递给函数的参数"`
@@ -34,7 +34,7 @@ func (f *DelayCreateFunction) Name() string {
 }
 
 func (f *DelayCreateFunction) Description() string {
-	return "创建一个延时任务，在指定时间执行指定的函数。任务名称必须唯一，执行时间必须是未来时间点（ISO8601格式）。"
+	return "创建一个延时任务，在指定时间执行指定的函数。执行时间必须是未来时间点（ISO8601格式）。创建成功后返回任务ID。"
 }
 
 func (f *DelayCreateFunction) ParamsType() reflect.Type {
@@ -57,8 +57,8 @@ func (f *DelayCreateFunction) Execute(ctx context.Context, params any) (function
 	}
 
 	return function.Result{
-		Message: fmt.Sprintf("延时任务 '%s' 创建成功，将在 %s 执行函数 '%s'",
-			task.Name, task.RunAt.Format("2006-01-02 15:04:05"), task.FunctionName),
+		Message: fmt.Sprintf("延时任务创建成功（ID: %d），将在 %s 执行函数 '%s'",
+			task.ID, task.RunAt.Format("2006-01-02 15:04:05"), task.FunctionName),
 		Data: map[string]any{
 			"id":            task.ID,
 			"name":          task.Name,
@@ -73,7 +73,8 @@ func (f *DelayCreateFunction) Execute(ctx context.Context, params any) (function
 // DelayListParams 列出延时任务的参数
 type DelayListParams struct {
 	Status string `json:"status" desc:"按状态筛选：pending/running/completed/failed/cancelled/missed，不填则返回所有"`
-	Limit  int    `json:"limit" desc:"返回数量限制，默认50" default:"50"`
+	Limit  int    `json:"limit" desc:"返回数量限制，默认20" default:"20"`
+	Offset int    `json:"offset" desc:"偏移量，用于分页" default:"0"`
 }
 
 // DelayListFunction 列出延时任务的函数
@@ -103,7 +104,7 @@ func (f *DelayListFunction) Execute(ctx context.Context, params any) (function.R
 
 	limit := p.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = 20
 	}
 
 	var status *scheduler.TaskStatus
@@ -119,7 +120,12 @@ func (f *DelayListFunction) Execute(ctx context.Context, params any) (function.R
 		}
 	}
 
-	tasks, err := f.scheduler.ListTasks(status, limit)
+	tasks, err := f.scheduler.ListTasks(status, limit, p.Offset)
+	if err != nil {
+		return function.Result{}, err
+	}
+
+	total, err := f.scheduler.CountTasks(status)
 	if err != nil {
 		return function.Result{}, err
 	}
@@ -143,23 +149,25 @@ func (f *DelayListFunction) Execute(ctx context.Context, params any) (function.R
 		}
 	}
 
-	message := fmt.Sprintf("找到 %d 个延时任务", len(tasks))
+	message := fmt.Sprintf("找到 %d 个延时任务（共 %d 个）", len(tasks), total)
 	if status != nil {
-		message = fmt.Sprintf("找到 %d 个状态为 %s 的延时任务", len(tasks), *status)
+		message = fmt.Sprintf("找到 %d 个状态为 %s 的延时任务（共 %d 个）", len(tasks), *status, total)
 	}
 
 	return function.Result{
 		Message: message,
 		Data: map[string]any{
-			"total": len(tasks),
-			"tasks": taskList,
+			"total":  total,
+			"limit":  limit,
+			"offset": p.Offset,
+			"tasks":  taskList,
 		},
 	}, nil
 }
 
 // DelayCancelParams 取消延时任务的参数
 type DelayCancelParams struct {
-	Name string `json:"name" desc:"要取消的任务名称" required:"true"`
+	ID uint `json:"id" desc:"要取消的任务ID" required:"true"`
 }
 
 // DelayCancelFunction 取消延时任务的函数
@@ -177,7 +185,7 @@ func (f *DelayCancelFunction) Name() string {
 }
 
 func (f *DelayCancelFunction) Description() string {
-	return "取消一个待执行的延时任务。只有状态为 pending 的任务才能被取消。"
+	return "根据ID取消一个待执行的延时任务。只有状态为 pending 的任务才能被取消。"
 }
 
 func (f *DelayCancelFunction) ParamsType() reflect.Type {
@@ -187,14 +195,14 @@ func (f *DelayCancelFunction) ParamsType() reflect.Type {
 func (f *DelayCancelFunction) Execute(ctx context.Context, params any) (function.Result, error) {
 	p := params.(DelayCancelParams)
 
-	if err := f.scheduler.CancelTask(p.Name); err != nil {
+	if err := f.scheduler.CancelTaskByID(p.ID); err != nil {
 		return function.Result{}, err
 	}
 
 	return function.Result{
-		Message: fmt.Sprintf("延时任务 '%s' 已取消", p.Name),
+		Message: fmt.Sprintf("延时任务（ID: %d）已取消", p.ID),
 		Data: map[string]any{
-			"name":   p.Name,
+			"id":     p.ID,
 			"status": "cancelled",
 		},
 	}, nil
@@ -202,7 +210,7 @@ func (f *DelayCancelFunction) Execute(ctx context.Context, params any) (function
 
 // DelayGetParams 获取延时任务详情的参数
 type DelayGetParams struct {
-	Name string `json:"name" desc:"任务名称" required:"true"`
+	ID uint `json:"id" desc:"任务ID" required:"true"`
 }
 
 // DelayGetFunction 获取延时任务详情的函数
@@ -220,7 +228,7 @@ func (f *DelayGetFunction) Name() string {
 }
 
 func (f *DelayGetFunction) Description() string {
-	return "获取指定延时任务的详细信息"
+	return "根据ID获取延时任务的详细信息"
 }
 
 func (f *DelayGetFunction) ParamsType() reflect.Type {
@@ -230,7 +238,7 @@ func (f *DelayGetFunction) ParamsType() reflect.Type {
 func (f *DelayGetFunction) Execute(ctx context.Context, params any) (function.Result, error) {
 	p := params.(DelayGetParams)
 
-	task, err := f.scheduler.GetTask(p.Name)
+	task, err := f.scheduler.GetTaskByID(p.ID)
 	if err != nil {
 		return function.Result{}, err
 	}
@@ -273,7 +281,7 @@ func (f *DelayGetFunction) Execute(ctx context.Context, params any) (function.Re
 	}
 
 	return function.Result{
-		Message: fmt.Sprintf("任务 '%s' 的状态: %s", task.Name, statusDesc),
+		Message: fmt.Sprintf("任务（ID: %d）的状态: %s", task.ID, statusDesc),
 		Data:    data,
 	}, nil
 }

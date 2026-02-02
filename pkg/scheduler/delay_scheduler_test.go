@@ -106,6 +106,9 @@ func TestDelayScheduler_CreateTask(t *testing.T) {
 	if task.Status != StatusPending {
 		t.Errorf("Expected status 'pending', got '%s'", task.Status)
 	}
+	if task.ID == 0 {
+		t.Error("Expected task to have a valid ID")
+	}
 }
 
 func TestDelayScheduler_CreateTask_FunctionNotFound(t *testing.T) {
@@ -158,19 +161,24 @@ func TestDelayScheduler_CreateTask_DuplicateName(t *testing.T) {
 
 	// 创建第一个任务
 	runAt := time.Now().Add(1 * time.Hour)
-	_, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task1, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
 	if err != nil {
 		t.Fatalf("Failed to create first task: %v", err)
 	}
 
-	// 尝试创建同名任务
-	_, err = scheduler.CreateTask("test_task", "test_func", runAt.Add(time.Hour), nil)
-	if err != ErrTaskExists {
-		t.Errorf("Expected ErrTaskExists, got %v", err)
+	// 创建同名任务（现在应该成功，因为允许重复名称）
+	task2, err := scheduler.CreateTask("test_task", "test_func", runAt.Add(time.Hour), nil)
+	if err != nil {
+		t.Fatalf("Should allow duplicate name, but got error: %v", err)
+	}
+
+	// 验证两个任务有不同的 ID
+	if task1.ID == task2.ID {
+		t.Error("Expected different IDs for tasks with duplicate names")
 	}
 }
 
-func TestDelayScheduler_CancelTask(t *testing.T) {
+func TestDelayScheduler_CancelTaskByID(t *testing.T) {
 	scheduler, _, registry := setupTestScheduler(t)
 	defer scheduler.Stop()
 
@@ -184,23 +192,23 @@ func TestDelayScheduler_CancelTask(t *testing.T) {
 
 	// 创建任务
 	runAt := time.Now().Add(1 * time.Hour)
-	_, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// 取消任务
-	if err := scheduler.CancelTask("test_task"); err != nil {
+	if err := scheduler.CancelTaskByID(task.ID); err != nil {
 		t.Fatalf("Failed to cancel task: %v", err)
 	}
 
 	// 验证状态
-	task, err := scheduler.GetTask("test_task")
+	retrieved, err := scheduler.GetTaskByID(task.ID)
 	if err != nil {
 		t.Fatalf("Failed to get task: %v", err)
 	}
-	if task.Status != StatusCancelled {
-		t.Errorf("Expected status 'cancelled', got '%s'", task.Status)
+	if retrieved.Status != StatusCancelled {
+		t.Errorf("Expected status 'cancelled', got '%s'", retrieved.Status)
 	}
 }
 
@@ -218,7 +226,7 @@ func TestDelayScheduler_ExecuteTask(t *testing.T) {
 
 	// 创建一个马上执行的任务
 	runAt := time.Now().Add(100 * time.Millisecond)
-	_, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -232,12 +240,12 @@ func TestDelayScheduler_ExecuteTask(t *testing.T) {
 	}
 
 	// 验证状态变为 completed
-	task, err := scheduler.GetTask("test_task")
+	retrieved, err := scheduler.GetTaskByID(task.ID)
 	if err != nil {
 		t.Fatalf("Failed to get task: %v", err)
 	}
-	if task.Status != StatusCompleted {
-		t.Errorf("Expected status 'completed', got '%s'", task.Status)
+	if retrieved.Status != StatusCompleted {
+		t.Errorf("Expected status 'completed', got '%s'", retrieved.Status)
 	}
 }
 
@@ -264,7 +272,7 @@ func TestDelayScheduler_ListTasks(t *testing.T) {
 	}
 
 	// 列出所有任务
-	tasks, err := scheduler.ListTasks(nil, 0)
+	tasks, err := scheduler.ListTasks(nil, 20, 0)
 	if err != nil {
 		t.Fatalf("Failed to list tasks: %v", err)
 	}
@@ -274,12 +282,71 @@ func TestDelayScheduler_ListTasks(t *testing.T) {
 
 	// 列出 pending 任务
 	status := StatusPending
-	tasks, err = scheduler.ListTasks(&status, 0)
+	tasks, err = scheduler.ListTasks(&status, 20, 0)
 	if err != nil {
 		t.Fatalf("Failed to list pending tasks: %v", err)
 	}
 	if len(tasks) != 3 {
 		t.Errorf("Expected 3 pending tasks, got %d", len(tasks))
+	}
+}
+
+func TestDelayScheduler_ListTasks_Pagination(t *testing.T) {
+	scheduler, _, registry := setupTestScheduler(t)
+	defer scheduler.Stop()
+
+	// 注册测试函数
+	mockFn := &MockFunction{name: "test_func"}
+	_ = registry.Register(mockFn)
+
+	if err := scheduler.Start(); err != nil {
+		t.Fatalf("Failed to start scheduler: %v", err)
+	}
+
+	// 创建5个任务
+	runAt := time.Now().Add(1 * time.Hour)
+	for i := 0; i < 5; i++ {
+		name := "task_" + string(rune('a'+i))
+		_, err := scheduler.CreateTask(name, "test_func", runAt.Add(time.Duration(i)*time.Minute), nil)
+		if err != nil {
+			t.Fatalf("Failed to create task %s: %v", name, err)
+		}
+	}
+
+	// 测试分页：limit=2, offset=0
+	tasks, err := scheduler.ListTasks(nil, 2, 0)
+	if err != nil {
+		t.Fatalf("Failed to list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("Expected 2 tasks with limit=2, got %d", len(tasks))
+	}
+
+	// 测试分页：limit=2, offset=2
+	tasks, err = scheduler.ListTasks(nil, 2, 2)
+	if err != nil {
+		t.Fatalf("Failed to list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("Expected 2 tasks with limit=2,offset=2, got %d", len(tasks))
+	}
+
+	// 测试分页：limit=2, offset=4
+	tasks, err = scheduler.ListTasks(nil, 2, 4)
+	if err != nil {
+		t.Fatalf("Failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("Expected 1 task with limit=2,offset=4, got %d", len(tasks))
+	}
+
+	// 测试总数
+	count, err := scheduler.CountTasks(nil)
+	if err != nil {
+		t.Fatalf("Failed to count tasks: %v", err)
+	}
+	if count != 5 {
+		t.Errorf("Expected count 5, got %d", count)
 	}
 }
 
@@ -302,6 +369,7 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	if err := db.Create(expiredTask).Error; err != nil {
 		t.Fatalf("Failed to create expired task: %v", err)
 	}
+	expiredID := expiredTask.ID
 
 	// 预先创建一个未过期任务
 	futureTask := &DelayTask{
@@ -313,6 +381,7 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	if err := db.Create(futureTask).Error; err != nil {
 		t.Fatalf("Failed to create future task: %v", err)
 	}
+	futureID := futureTask.ID
 
 	// 创建调度器并启动（会触发恢复）
 	scheduler := NewDelayScheduler(db, registry, testLogger)
@@ -322,7 +391,7 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	defer scheduler.Stop()
 
 	// 验证过期任务被标记为 missed
-	task1, err := scheduler.GetTask("expired_task")
+	task1, err := scheduler.GetTaskByID(expiredID)
 	if err != nil {
 		t.Fatalf("Failed to get expired task: %v", err)
 	}
@@ -331,7 +400,7 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	}
 
 	// 验证未过期任务仍为 pending
-	task2, err := scheduler.GetTask("future_task")
+	task2, err := scheduler.GetTaskByID(futureID)
 	if err != nil {
 		t.Fatalf("Failed to get future task: %v", err)
 	}
@@ -355,22 +424,13 @@ func TestRepository_CRUD(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// Read by name
-	retrieved, err := repo.GetByName("test_task")
-	if err != nil {
-		t.Fatalf("Failed to get task by name: %v", err)
-	}
-	if retrieved.Name != "test_task" {
-		t.Errorf("Expected name 'test_task', got '%s'", retrieved.Name)
-	}
-
 	// Read by ID
-	retrievedByID, err := repo.GetByID(task.ID)
+	retrieved, err := repo.GetByID(task.ID)
 	if err != nil {
 		t.Fatalf("Failed to get task by ID: %v", err)
 	}
-	if retrievedByID.ID != task.ID {
-		t.Errorf("Expected ID %d, got %d", task.ID, retrievedByID.ID)
+	if retrieved.Name != "test_task" {
+		t.Errorf("Expected name 'test_task', got '%s'", retrieved.Name)
 	}
 
 	// Update
@@ -378,31 +438,31 @@ func TestRepository_CRUD(t *testing.T) {
 	if err := repo.Update(task); err != nil {
 		t.Fatalf("Failed to update task: %v", err)
 	}
-	updated, _ := repo.GetByName("test_task")
+	updated, _ := repo.GetByID(task.ID)
 	if updated.Status != StatusRunning {
 		t.Errorf("Expected status 'running', got '%s'", updated.Status)
 	}
 
-	// UpdateStatus
-	if err := repo.UpdateStatus("test_task", StatusCompleted, "done", ""); err != nil {
+	// UpdateStatusByID
+	if err := repo.UpdateStatusByID(task.ID, StatusCompleted, "done", ""); err != nil {
 		t.Fatalf("Failed to update status: %v", err)
 	}
-	completed, _ := repo.GetByName("test_task")
+	completed, _ := repo.GetByID(task.ID)
 	if completed.Status != StatusCompleted {
 		t.Errorf("Expected status 'completed', got '%s'", completed.Status)
 	}
 
-	// Delete
-	if err := repo.Delete("test_task"); err != nil {
+	// DeleteByID
+	if err := repo.DeleteByID(task.ID); err != nil {
 		t.Fatalf("Failed to delete task: %v", err)
 	}
-	_, err = repo.GetByName("test_task")
+	_, err = repo.GetByID(task.ID)
 	if err != ErrTaskNotFound {
 		t.Errorf("Expected ErrTaskNotFound after delete, got %v", err)
 	}
 }
 
-func TestRepository_Cancel(t *testing.T) {
+func TestRepository_CancelByID(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewDelayTaskRepository(db)
 
@@ -416,18 +476,18 @@ func TestRepository_Cancel(t *testing.T) {
 	_ = repo.Create(task)
 
 	// 取消任务
-	if err := repo.Cancel("test_task"); err != nil {
+	if err := repo.CancelByID(task.ID); err != nil {
 		t.Fatalf("Failed to cancel task: %v", err)
 	}
 
 	// 验证状态
-	cancelled, _ := repo.GetByName("test_task")
+	cancelled, _ := repo.GetByID(task.ID)
 	if cancelled.Status != StatusCancelled {
 		t.Errorf("Expected status 'cancelled', got '%s'", cancelled.Status)
 	}
 
 	// 尝试再次取消（应该失败，因为已经不是 pending）
-	err := repo.Cancel("test_task")
+	err := repo.CancelByID(task.ID)
 	if err != ErrTaskNotPending {
 		t.Errorf("Expected ErrTaskNotPending, got %v", err)
 	}
@@ -448,7 +508,7 @@ func TestRepository_List(t *testing.T) {
 	}
 
 	// 列出所有
-	all, err := repo.List(nil, 0)
+	all, err := repo.List(nil, 20, 0)
 	if err != nil {
 		t.Fatalf("Failed to list all tasks: %v", err)
 	}
@@ -465,12 +525,31 @@ func TestRepository_List(t *testing.T) {
 		t.Errorf("Expected 2 pending tasks, got %d", len(pending))
 	}
 
-	// 带 limit
-	limited, err := repo.List(nil, 2)
+	// 带 limit 和 offset
+	limited, err := repo.List(nil, 2, 0)
 	if err != nil {
 		t.Fatalf("Failed to list with limit: %v", err)
 	}
 	if len(limited) != 2 {
 		t.Errorf("Expected 2 tasks with limit, got %d", len(limited))
+	}
+
+	// 测试 Count
+	count, err := repo.Count(nil)
+	if err != nil {
+		t.Fatalf("Failed to count tasks: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("Expected count 3, got %d", count)
+	}
+
+	// 测试 Count with status
+	statusPending := StatusPending
+	countPending, err := repo.Count(&statusPending)
+	if err != nil {
+		t.Fatalf("Failed to count pending tasks: %v", err)
+	}
+	if countPending != 2 {
+		t.Errorf("Expected pending count 2, got %d", countPending)
 	}
 }

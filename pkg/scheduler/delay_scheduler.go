@@ -21,7 +21,7 @@ type DelayScheduler struct {
 	logger   *slog.Logger
 
 	mu     sync.RWMutex
-	timers map[string]*time.Timer // 任务名 -> 定时器
+	timers map[uint]*time.Timer // 任务ID -> 定时器
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -36,7 +36,7 @@ func NewDelayScheduler(db *gorm.DB, registry *function.Registry, logger *slog.Lo
 		repo:     NewDelayTaskRepository(db),
 		registry: registry,
 		logger:   logger,
-		timers:   make(map[string]*time.Timer),
+		timers:   make(map[uint]*time.Timer),
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -69,11 +69,11 @@ func (s *DelayScheduler) Stop() {
 	defer s.mu.Unlock()
 
 	// 停止所有定时器
-	for name, timer := range s.timers {
+	for id, timer := range s.timers {
 		timer.Stop()
-		s.logger.Debug("stopped timer", "task", name)
+		s.logger.Debug("stopped timer", "task_id", id)
 	}
-	s.timers = make(map[string]*time.Timer)
+	s.timers = make(map[uint]*time.Timer)
 
 	s.logger.Info("delay scheduler stopped")
 }
@@ -90,17 +90,17 @@ func (s *DelayScheduler) recoverTasks() error {
 	for _, task := range tasks {
 		if task.IsExpired() {
 			// 已过期的任务标记为 missed
-			if err := s.repo.MarkAsMissed(task.Name); err != nil {
-				s.logger.Error("failed to mark task as missed", "task", task.Name, "error", err)
+			if err := s.repo.MarkAsMissedByID(task.ID); err != nil {
+				s.logger.Error("failed to mark task as missed", "task_id", task.ID, "name", task.Name, "error", err)
 			} else {
-				s.logger.Warn("task missed due to server restart", "task", task.Name, "run_at", task.RunAt)
+				s.logger.Warn("task missed due to server restart", "task_id", task.ID, "name", task.Name, "run_at", task.RunAt)
 			}
 		} else {
 			// 未过期的任务重新调度
 			if err := s.scheduleTask(&task); err != nil {
-				s.logger.Error("failed to reschedule task", "task", task.Name, "error", err)
+				s.logger.Error("failed to reschedule task", "task_id", task.ID, "name", task.Name, "error", err)
 			} else {
-				s.logger.Info("task rescheduled", "task", task.Name, "run_at", task.RunAt)
+				s.logger.Info("task rescheduled", "task_id", task.ID, "name", task.Name, "run_at", task.RunAt)
 			}
 		}
 	}
@@ -118,15 +118,6 @@ func (s *DelayScheduler) CreateTask(name, functionName string, runAt time.Time, 
 	// 检查执行时间是否在未来
 	if runAt.Before(time.Now()) {
 		return nil, fmt.Errorf("run_at must be in the future")
-	}
-
-	// 检查任务名是否已存在
-	exists, err := s.repo.Exists(name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check task existence: %w", err)
-	}
-	if exists {
-		return nil, ErrTaskExists
 	}
 
 	// 序列化参数
@@ -155,12 +146,13 @@ func (s *DelayScheduler) CreateTask(name, functionName string, runAt time.Time, 
 	// 调度任务
 	if err := s.scheduleTask(task); err != nil {
 		// 如果调度失败，删除任务
-		_ = s.repo.Delete(name)
+		_ = s.repo.DeleteByID(task.ID)
 		return nil, fmt.Errorf("failed to schedule task: %w", err)
 	}
 
 	s.logger.Info("task created and scheduled",
-		"task", name,
+		"task_id", task.ID,
+		"name", name,
 		"function", functionName,
 		"run_at", runAt,
 	)
@@ -178,20 +170,22 @@ func (s *DelayScheduler) scheduleTask(task *DelayTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 如果已有同名定时器，先停止
-	if existingTimer, ok := s.timers[task.Name]; ok {
+	// 如果已有同 ID 定时器，先停止
+	if existingTimer, ok := s.timers[task.ID]; ok {
 		existingTimer.Stop()
 	}
 
 	// 创建新定时器
+	taskID := task.ID
 	timer := time.AfterFunc(delay, func() {
-		s.executeTask(task.Name)
+		s.executeTask(taskID)
 	})
 
-	s.timers[task.Name] = timer
+	s.timers[task.ID] = timer
 
 	s.logger.Debug("task scheduled",
-		"task", task.Name,
+		"task_id", task.ID,
+		"name", task.Name,
 		"delay", delay,
 		"run_at", task.RunAt,
 	)
@@ -200,7 +194,7 @@ func (s *DelayScheduler) scheduleTask(task *DelayTask) error {
 }
 
 // executeTask 执行任务
-func (s *DelayScheduler) executeTask(taskName string) {
+func (s *DelayScheduler) executeTask(taskID uint) {
 	// 检查调度器是否已停止
 	select {
 	case <-s.ctx.Done():
@@ -208,24 +202,24 @@ func (s *DelayScheduler) executeTask(taskName string) {
 	default:
 	}
 
-	s.logger.Info("executing task", "task", taskName)
+	s.logger.Info("executing task", "task_id", taskID)
 
 	// 获取任务信息
-	task, err := s.repo.GetByName(taskName)
+	task, err := s.repo.GetByID(taskID)
 	if err != nil {
-		s.logger.Error("failed to get task", "task", taskName, "error", err)
+		s.logger.Error("failed to get task", "task_id", taskID, "error", err)
 		return
 	}
 
 	// 检查任务状态
 	if task.Status != StatusPending {
-		s.logger.Warn("task is not pending, skipping", "task", taskName, "status", task.Status)
+		s.logger.Warn("task is not pending, skipping", "task_id", taskID, "status", task.Status)
 		return
 	}
 
 	// 更新状态为 running
-	if err := s.repo.UpdateStatus(taskName, StatusRunning, "", ""); err != nil {
-		s.logger.Error("failed to update task status to running", "task", taskName, "error", err)
+	if err := s.repo.UpdateStatusByID(taskID, StatusRunning, "", ""); err != nil {
+		s.logger.Error("failed to update task status to running", "task_id", taskID, "error", err)
 		return
 	}
 
@@ -233,8 +227,8 @@ func (s *DelayScheduler) executeTask(taskName string) {
 	_, ok := s.registry.Get(task.FunctionName)
 	if !ok {
 		errMsg := fmt.Sprintf("function not found: %s", task.FunctionName)
-		s.logger.Error(errMsg, "task", taskName)
-		_ = s.repo.UpdateStatus(taskName, StatusFailed, "", errMsg)
+		s.logger.Error(errMsg, "task_id", taskID)
+		_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
 		return
 	}
 
@@ -243,8 +237,8 @@ func (s *DelayScheduler) executeTask(taskName string) {
 	if task.Params != "" {
 		if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
 			errMsg := fmt.Sprintf("failed to unmarshal params: %v", err)
-			s.logger.Error(errMsg, "task", taskName)
-			_ = s.repo.UpdateStatus(taskName, StatusFailed, "", errMsg)
+			s.logger.Error(errMsg, "task_id", taskID)
+			_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
 			return
 		}
 	}
@@ -264,47 +258,52 @@ func (s *DelayScheduler) executeTask(taskName string) {
 	// 更新任务状态
 	if err != nil {
 		errMsg := err.Error()
-		s.logger.Error("task execution failed", "task", taskName, "error", errMsg)
-		_ = s.repo.UpdateStatus(taskName, StatusFailed, "", errMsg)
+		s.logger.Error("task execution failed", "task_id", taskID, "error", errMsg)
+		_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
 	} else {
 		resultJSON, _ := json.Marshal(result)
-		s.logger.Info("task execution completed", "task", taskName, "result", string(resultJSON))
-		_ = s.repo.UpdateStatus(taskName, StatusCompleted, string(resultJSON), "")
+		s.logger.Info("task execution completed", "task_id", taskID, "result", string(resultJSON))
+		_ = s.repo.UpdateStatusByID(taskID, StatusCompleted, string(resultJSON), "")
 	}
 
 	// 从定时器映射中移除
 	s.mu.Lock()
-	delete(s.timers, taskName)
+	delete(s.timers, taskID)
 	s.mu.Unlock()
 }
 
-// CancelTask 取消任务
-func (s *DelayScheduler) CancelTask(name string) error {
+// CancelTaskByID 根据 ID 取消任务
+func (s *DelayScheduler) CancelTaskByID(id uint) error {
 	// 先取消定时器
 	s.mu.Lock()
-	if timer, ok := s.timers[name]; ok {
+	if timer, ok := s.timers[id]; ok {
 		timer.Stop()
-		delete(s.timers, name)
+		delete(s.timers, id)
 	}
 	s.mu.Unlock()
 
 	// 更新数据库状态
-	if err := s.repo.Cancel(name); err != nil {
+	if err := s.repo.CancelByID(id); err != nil {
 		return err
 	}
 
-	s.logger.Info("task cancelled", "task", name)
+	s.logger.Info("task cancelled", "task_id", id)
 	return nil
 }
 
-// GetTask 获取任务信息
-func (s *DelayScheduler) GetTask(name string) (*DelayTask, error) {
-	return s.repo.GetByName(name)
+// GetTaskByID 根据 ID 获取任务信息
+func (s *DelayScheduler) GetTaskByID(id uint) (*DelayTask, error) {
+	return s.repo.GetByID(id)
 }
 
 // ListTasks 列出任务
-func (s *DelayScheduler) ListTasks(status *TaskStatus, limit int) ([]DelayTask, error) {
-	return s.repo.List(status, limit)
+func (s *DelayScheduler) ListTasks(status *TaskStatus, limit, offset int) ([]DelayTask, error) {
+	return s.repo.List(status, limit, offset)
+}
+
+// CountTasks 统计任务数量
+func (s *DelayScheduler) CountTasks(status *TaskStatus) (int64, error) {
+	return s.repo.Count(status)
 }
 
 // ListPendingTasks 列出待执行的任务

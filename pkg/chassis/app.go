@@ -22,6 +22,7 @@ type App struct {
 	agent          *Agent
 	provider       llm.Provider
 	delayScheduler *scheduler.DelayScheduler
+	cronScheduler  *scheduler.CronScheduler
 }
 
 // New 创建新的 App 实例
@@ -115,10 +116,18 @@ func (a *App) Initialize() error {
 
 	observability.Info("DelayScheduler started")
 
-	// 5. 注册内置调度函数
+	// 5. 初始化 CronScheduler
+	a.cronScheduler = scheduler.NewCronScheduler(db, a.registry, logger)
+	if err := a.cronScheduler.Start(); err != nil {
+		return fmt.Errorf("failed to start cron scheduler: %w", err)
+	}
+
+	observability.Info("CronScheduler started")
+
+	// 6. 注册内置调度函数
 	a.registerBuiltinSchedulerFunctions()
 
-	// 6. 创建 Agent
+	// 7. 创建 Agent
 	a.agent = NewAgent(a.provider, a.registry, nil)
 
 	observability.Info("AgentChassis initialized",
@@ -139,8 +148,16 @@ func (a *App) registerBuiltinSchedulerFunctions() {
 	_ = a.registry.Register(builtin.NewDelayCancelFunction(a.delayScheduler))
 	_ = a.registry.Register(builtin.NewDelayGetFunction(a.delayScheduler))
 
+	// 注册定时任务管理函数
+	_ = a.registry.Register(builtin.NewCronCreateFunction(a.cronScheduler))
+	_ = a.registry.Register(builtin.NewCronListFunction(a.cronScheduler))
+	_ = a.registry.Register(builtin.NewCronDeleteFunction(a.cronScheduler))
+	_ = a.registry.Register(builtin.NewCronGetFunction(a.cronScheduler))
+	_ = a.registry.Register(builtin.NewCronHistoryFunction(a.cronScheduler))
+
 	observability.Info("Registered builtin functions",
-		"functions", []string{"send_message", "delay_create", "delay_list", "delay_cancel", "delay_get"},
+		"delay_functions", []string{"send_message", "delay_create", "delay_list", "delay_cancel", "delay_get"},
+		"cron_functions", []string{"cron_create", "cron_list", "cron_delete", "cron_get", "cron_history"},
 	)
 }
 
@@ -172,6 +189,9 @@ func (a *App) Shutdown() error {
 	if a.delayScheduler != nil {
 		a.delayScheduler.Stop()
 	}
+	if a.cronScheduler != nil {
+		a.cronScheduler.Stop()
+	}
 
 	// 关闭数据库
 	if err := storage.Close(); err != nil {
@@ -186,4 +206,9 @@ func (a *App) Shutdown() error {
 // GetDelayScheduler 获取延时任务调度器
 func (a *App) GetDelayScheduler() *scheduler.DelayScheduler {
 	return a.delayScheduler
+}
+
+// GetCronScheduler 获取定时任务调度器
+func (a *App) GetCronScheduler() *scheduler.CronScheduler {
+	return a.cronScheduler
 }
