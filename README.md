@@ -87,6 +87,13 @@ func main() {
 }
 ```
 
+### 或运行 Agent
+
+```bash
+go run cmd/agent/main.go serve \
+  --config configs/config.yaml # 你的配置文件路径
+```
+
 ### 测试调用
 
 ```bash
