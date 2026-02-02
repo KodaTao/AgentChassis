@@ -1,0 +1,37 @@
+# AgentChassis 配置文件示例
+
+# 服务器配置
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug"  # debug, release, test
+
+# LLM 配置
+llm:
+  provider: "openai"
+  api_key: "${OPENAI_API_KEY}"  # 支持环境变量
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4"
+  timeout: 60s
+  max_tokens: 4096
+  temperature: 0.7
+
+# 数据库配置
+database:
+  path: "~/.agentchassis/data.db"
+
+# 日志配置
+log:
+  level: "info"    # debug, info, warn, error
+  format: "text"   # text, json
+  output: "stdout" # stdout, file
+  file_path: ""    # 当 output 为 file 时生效
+
+# 可观测性配置（后期）
+observability:
+  metrics:
+    enabled: false
+    path: "/metrics"
+  tracing:
+    enabled: false
+    endpoint: ""
