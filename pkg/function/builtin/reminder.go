@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/KodaTao/AgentChassis/pkg/function"
@@ -15,27 +16,31 @@ import (
 type NotificationChannel string
 
 const (
-	ChannelConsole NotificationChannel = "console" // 控制台输出（默认）
-	ChannelEmail   NotificationChannel = "email"   // 邮件（待实现）
-	ChannelSMS     NotificationChannel = "sms"     // 短信（待实现）
-	ChannelWeChat  NotificationChannel = "wechat"  // 微信（待实现）
+	ChannelConsole  NotificationChannel = "console"  // 控制台输出（默认）
+	ChannelTelegram NotificationChannel = "telegram" // Telegram 消息
+	ChannelEmail    NotificationChannel = "email"    // 邮件（待实现）
+	ChannelSMS      NotificationChannel = "sms"      // 短信（待实现）
+	ChannelWeChat   NotificationChannel = "wechat"   // 微信（待实现）
 )
+
+// TelegramSender Telegram 消息发送器接口
+// 用于解耦 builtin 包对 telegram 包的依赖
+type TelegramSender interface {
+	SendNotification(chatID int64, text string) error
+}
 
 // SendMessageParams 发送消息的参数
 type SendMessageParams struct {
-	To      string `json:"to" desc:"接收者（人名、邮箱、手机号等，根据渠道而定）" required:"true"`
+	To      string `json:"to" desc:"接收者（人名、邮箱、telegram chat_id 等，根据渠道而定）" required:"true"`
 	Message string `json:"message" desc:"消息内容" required:"true"`
-	Channel string `json:"channel" desc:"通知渠道：console（控制台，默认）、email、sms、wechat" default:"console"`
+	Channel string `json:"channel" desc:"通知渠道：console（控制台，默认）、telegram、email、sms、wechat" default:"console"`
 }
 
 // SendMessageFunction 发送消息的函数
 // 这是一个通用的外部通知函数，用于向他人发送消息
-// 目前支持控制台输出，未来可扩展为邮件、短信、微信等渠道
+// 支持控制台输出、Telegram，未来可扩展为邮件、短信、微信等渠道
 type SendMessageFunction struct {
-	// 可以在这里注入不同渠道的发送器
-	// emailSender EmailSender
-	// smsSender   SMSSender
-	// wechatSender WeChatSender
+	telegramSender TelegramSender
 }
 
 func (f *SendMessageFunction) Name() string {
@@ -43,7 +48,7 @@ func (f *SendMessageFunction) Name() string {
 }
 
 func (f *SendMessageFunction) Description() string {
-	return "向指定的人发送消息通知。可以直接调用，也可以配合延时任务在指定时间发送。目前支持控制台输出，未来可扩展邮件、短信、微信等渠道。"
+	return "向指定的人发送消息通知。可以直接调用，也可以配合延时任务在指定时间发送。支持控制台输出和 Telegram，未来可扩展邮件、短信、微信等渠道。对于 Telegram 渠道，to 参数需要是 chat_id。"
 }
 
 func (f *SendMessageFunction) ParamsType() reflect.Type {
@@ -102,6 +107,34 @@ func (f *SendMessageFunction) Execute(ctx context.Context, params any) (function
 			"time", timestamp,
 		)
 
+	case ChannelTelegram:
+		// Telegram 消息
+		if f.telegramSender == nil {
+			deliveryStatus = "unavailable"
+			deliveryError = fmt.Errorf("telegram sender is not configured")
+		} else {
+			// 解析 chat_id
+			chatID, err := strconv.ParseInt(p.To, 10, 64)
+			if err != nil {
+				deliveryStatus = "failed"
+				deliveryError = fmt.Errorf("invalid telegram chat_id: %s", p.To)
+			} else {
+				// 发送消息
+				if err := f.telegramSender.SendNotification(chatID, p.Message); err != nil {
+					deliveryStatus = "failed"
+					deliveryError = fmt.Errorf("failed to send telegram message: %w", err)
+				} else {
+					deliveryStatus = "delivered"
+					observability.Info("Message sent via Telegram",
+						"channel", "telegram",
+						"chat_id", chatID,
+						"message", truncateString(p.Message, 50),
+						"time", timestamp,
+					)
+				}
+			}
+		}
+
 	case ChannelEmail:
 		// TODO: 实现邮件发送
 		deliveryStatus = "unsupported"
@@ -159,4 +192,16 @@ func truncateString(s string, maxLen int) string {
 // NewSendMessageFunction 创建 SendMessageFunction
 func NewSendMessageFunction() *SendMessageFunction {
 	return &SendMessageFunction{}
+}
+
+// NewSendMessageFunctionWithTelegram 创建带 Telegram 支持的 SendMessageFunction
+func NewSendMessageFunctionWithTelegram(telegramSender TelegramSender) *SendMessageFunction {
+	return &SendMessageFunction{
+		telegramSender: telegramSender,
+	}
+}
+
+// SetTelegramSender 设置 Telegram 发送器（用于延迟注入）
+func (f *SendMessageFunction) SetTelegramSender(sender TelegramSender) {
+	f.telegramSender = sender
 }

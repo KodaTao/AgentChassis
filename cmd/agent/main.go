@@ -72,6 +72,7 @@ func serveCmd() *cobra.Command {
 				chassis.WithLLMConfig(config.LLM),
 				chassis.WithLogLevel(config.Log.Level),
 				chassis.WithDatabasePath(config.Database.Path),
+				chassis.WithTelegram(config.Telegram),
 			)
 
 			// 初始化

@@ -9,11 +9,24 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server      ServerConfig      `mapstructure:"server"`
-	LLM         llm.Config        `mapstructure:"llm"`
-	Database    DatabaseConfig    `mapstructure:"database"`
-	Log         LogConfig         `mapstructure:"log"`
+	Server        ServerConfig        `mapstructure:"server"`
+	LLM           llm.Config          `mapstructure:"llm"`
+	Database      DatabaseConfig      `mapstructure:"database"`
+	Log           LogConfig           `mapstructure:"log"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
+	Telegram      TelegramConfig      `mapstructure:"telegram"`
+}
+
+// TelegramConfig Telegram Bot 配置
+type TelegramConfig struct {
+	// Enabled 是否启用 Telegram Bot
+	Enabled bool `mapstructure:"enabled"`
+
+	// Token Bot Token
+	Token string `mapstructure:"token"`
+
+	// SessionTTL Session 映射保留时间
+	SessionTTL time.Duration `mapstructure:"session_ttl"`
 }
 
 // ServerConfig 服务器配置
@@ -106,6 +119,11 @@ func DefaultConfig() *Config {
 				Enabled: false,
 			},
 		},
+		Telegram: TelegramConfig{
+			Enabled:    false,
+			Token:      "",
+			SessionTTL: 24 * time.Hour,
+		},
 	}
 }
 
@@ -144,6 +162,13 @@ func WithLogLevel(level string) Option {
 func WithDatabasePath(path string) Option {
 	return func(c *Config) {
 		c.Database.Path = path
+	}
+}
+
+// WithTelegram 设置telegram设置
+func WithTelegram(t TelegramConfig) Option {
+	return func(c *Config) {
+		c.Telegram = t
 	}
 }
 

@@ -12,17 +12,20 @@ import (
 	"github.com/KodaTao/AgentChassis/pkg/observability"
 	"github.com/KodaTao/AgentChassis/pkg/scheduler"
 	"github.com/KodaTao/AgentChassis/pkg/storage"
+	"github.com/KodaTao/AgentChassis/pkg/telegram"
 )
 
 // App AgentChassis 应用实例
 // 这是整个框架的入口点
 type App struct {
-	config         *Config
-	registry       *function.Registry
-	agent          *Agent
-	provider       llm.Provider
-	delayScheduler *scheduler.DelayScheduler
-	cronScheduler  *scheduler.CronScheduler
+	config              *Config
+	registry            *function.Registry
+	agent               *Agent
+	provider            llm.Provider
+	delayScheduler      *scheduler.DelayScheduler
+	cronScheduler       *scheduler.CronScheduler
+	telegramBot         *telegram.Bot
+	sendMessageFunction *builtin.SendMessageFunction // 保存引用以便后续注入 Telegram 发送器
 }
 
 // New 创建新的 App 实例
@@ -142,13 +145,52 @@ func (a *App) Initialize() error {
 		"registered_functions", a.registry.Count(),
 	)
 
+	// 9. 初始化 Telegram Bot（可选）
+	if a.config.Telegram.Enabled {
+		if err := a.initTelegramBot(); err != nil {
+			return fmt.Errorf("failed to initialize telegram bot: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// initTelegramBot 初始化 Telegram Bot
+func (a *App) initTelegramBot() error {
+	logger := slog.Default()
+
+	botConfig := telegram.Config{
+		Enabled:    a.config.Telegram.Enabled,
+		Token:      a.config.Telegram.Token,
+		SessionTTL: a.config.Telegram.SessionTTL,
+	}
+
+	bot, err := telegram.NewBot(botConfig, a.agent, logger)
+	if err != nil {
+		return err
+	}
+
+	a.telegramBot = bot
+
+	// 将 Telegram Bot 注入到 SendMessageFunction
+	if a.sendMessageFunction != nil {
+		a.sendMessageFunction.SetTelegramSender(bot)
+		observability.Info("Telegram sender injected to SendMessageFunction")
+	}
+
+	// 启动 Bot（异步接收消息）
+	bot.Start()
+
+	observability.Info("Telegram Bot started")
 	return nil
 }
 
 // registerBuiltinSchedulerFunctions 注册内置函数
 func (a *App) registerBuiltinSchedulerFunctions() {
 	// 注册消息发送函数（通用的外部通知函数，可直接调用或被延时任务调用）
-	_ = a.registry.Register(builtin.NewSendMessageFunction())
+	// 保存引用以便后续注入 Telegram 发送器
+	a.sendMessageFunction = builtin.NewSendMessageFunction()
+	_ = a.registry.Register(a.sendMessageFunction)
 
 	// 注册延时任务管理函数
 	_ = a.registry.Register(builtin.NewDelayCreateFunction(a.delayScheduler))
@@ -193,6 +235,12 @@ func (a *App) GetProvider() llm.Provider {
 func (a *App) Shutdown() error {
 	observability.Info("Shutting down AgentChassis")
 
+	// 停止 Telegram Bot
+	if a.telegramBot != nil {
+		a.telegramBot.Stop()
+		observability.Info("Telegram Bot stopped")
+	}
+
 	// 停止调度器
 	if a.delayScheduler != nil {
 		a.delayScheduler.Stop()
@@ -219,4 +267,9 @@ func (a *App) GetDelayScheduler() *scheduler.DelayScheduler {
 // GetCronScheduler 获取定时任务调度器
 func (a *App) GetCronScheduler() *scheduler.CronScheduler {
 	return a.cronScheduler
+}
+
+// GetTelegramBot 获取 Telegram Bot 实例
+func (a *App) GetTelegramBot() *telegram.Bot {
+	return a.telegramBot
 }

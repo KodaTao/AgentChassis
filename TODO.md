@@ -243,6 +243,7 @@
 | **P0** | 阶段六 | HTTP Server | ✅ 完成 |
 | **P1** | 阶段七 | 定时任务（DelayTask ✅ / CronTask ✅） | ✅ 完成 |
 | **P1** | 阶段八 | CLI 入口 | ✅ 完成 |
+| **P1** | 阶段十一 | Telegram Bot 集成 | 🔄 进行中 |
 | **P2** | 阶段九 | 可观测性增强 | 待开发 |
 | **P2** | 阶段十 | 示例和文档 | 🔄 进行中 |
 
@@ -279,3 +280,34 @@
 | 2024-XX-XX | **DelayTask 改进**：使用 ID 作为唯一标识，Name 改为描述性字段 |
 | 2024-XX-XX | **CronTask 完成**：实现定时任务调度功能（秒级精度，执行历史记录） |
 | 2025-02-03 | **任务创建优化**：添加渠道上下文支持、任务创建确认流程 |
+| 2025-02-03 | **Telegram Bot**：开始开发 Telegram Bot 集成（纯 Reply 机制会话管理） |
+
+---
+
+## 阶段十一：Telegram Bot 集成 🔄
+
+### 11.1 核心模块
+- [x] 创建 `pkg/telegram/` 目录结构
+- [x] 实现 `config.go` - Telegram 配置
+- [x] 实现 `session.go` - SessionStore（message_id → session_id 映射）
+- [x] 实现 `sender.go` - 消息发送封装
+- [x] 实现 `bot.go` - Bot 主逻辑
+- [x] 创建 `pkg/types/` - 共享类型定义（解决循环依赖）
+
+### 11.2 会话管理（纯 Reply 机制）
+- [x] 无 Reply 消息 → 创建新 session
+- [x] 有 Reply 消息 → 查找并继续对应 session
+- [x] Bot 回复时 Reply 用户消息
+- [x] 过期映射自动清理
+
+### 11.3 与现有系统集成
+- [x] 集成到 App 初始化流程
+- [x] 配置文件支持 telegram 配置项
+- [x] send_message 支持 telegram 渠道
+- [x] 任务触发时通过 telegram 发送通知
+
+### 11.4 测试
+- [ ] 单元测试
+- [ ] 手动测试：基本对话
+- [ ] 手动测试：任务创建确认流程
+- [ ] 手动测试：任务触发通知
