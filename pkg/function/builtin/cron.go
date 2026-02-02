@@ -13,11 +13,11 @@ import (
 
 // CronCreateParams 创建定时任务的参数
 type CronCreateParams struct {
-	Name         string         `json:"name" desc:"任务名称（描述性，可重复）" required:"true"`
-	CronExpr     string         `json:"cron_expr" desc:"Cron表达式（6字段，支持秒级），格式：秒 分 时 日 月 周。例如：'0 30 9 * * *' 每天9:30执行，'*/10 * * * * *' 每10秒执行" required:"true"`
-	FunctionName string         `json:"function_name" desc:"要执行的函数名" required:"true"`
-	Params       map[string]any `json:"params" desc:"传递给函数的参数"`
-	Description  string         `json:"description" desc:"任务描述"`
+	Name        string `json:"name" desc:"任务名称（描述性，可重复）" required:"true"`
+	CronExpr    string `json:"cron_expr" desc:"Cron表达式（6字段，支持秒级），格式：秒 分 时 日 月 周。例如：'0 30 9 * * *' 每天9:30执行，'*/10 * * * * *' 每10秒执行" required:"true"`
+	Prompt      string `json:"prompt" desc:"任务触发时发送给AI的提示词，AI会根据提示词决定执行什么操作" required:"true"`
+	Description string `json:"description" desc:"任务描述"`
+	Channel     string `json:"channel" desc:"渠道上下文JSON，如 {\"type\":\"console\"} 或 {\"type\":\"telegram\",\"chat_id\":\"123\"}"`
 }
 
 // CronCreateFunction 创建定时任务的函数
@@ -35,7 +35,7 @@ func (f *CronCreateFunction) Name() string {
 }
 
 func (f *CronCreateFunction) Description() string {
-	return "创建一个定时任务，按照 Cron 表达式周期性执行指定的函数。使用6字段格式（秒 分 时 日 月 周），例如 '0 30 9 * * *' 表示每天9:30执行。"
+	return "创建一个定时任务，按照 Cron 表达式周期性触发AI执行任务。使用6字段格式（秒 分 时 日 月 周），例如 '0 30 9 * * *' 表示每天9:30触发。触发时AI会根据prompt决定执行什么操作。"
 }
 
 func (f *CronCreateFunction) ParamsType() reflect.Type {
@@ -45,8 +45,14 @@ func (f *CronCreateFunction) ParamsType() reflect.Type {
 func (f *CronCreateFunction) Execute(ctx context.Context, params any) (function.Result, error) {
 	p := params.(CronCreateParams)
 
-	// 创建任务
-	task, err := f.scheduler.CreateTask(p.Name, p.CronExpr, p.FunctionName, p.Params, p.Description)
+	// 构建完整的 prompt（包含渠道信息）
+	fullPrompt := p.Prompt
+	if p.Channel != "" {
+		fullPrompt = fmt.Sprintf("【渠道信息：%s】\n%s", p.Channel, p.Prompt)
+	}
+
+	// 创建任务（传递渠道信息）
+	task, err := f.scheduler.CreateTask(p.Name, p.CronExpr, fullPrompt, p.Description, p.Channel)
 	if err != nil {
 		return function.Result{}, err
 	}
@@ -56,16 +62,21 @@ func (f *CronCreateFunction) Execute(ctx context.Context, params any) (function.
 		nextRunStr = task.NextRunAt.Format("2006-01-02 15:04:05")
 	}
 
+	data := map[string]any{
+		"id":          task.ID,
+		"name":        task.Name,
+		"cron_expr":   task.CronExpr,
+		"prompt":      task.Prompt,
+		"description": task.Description,
+		"next_run_at": nextRunStr,
+	}
+	if task.Channel != "" {
+		data["channel"] = task.Channel
+	}
+
 	return function.Result{
-		Message: fmt.Sprintf("定时任务创建成功（ID: %d），下次执行时间: %s", task.ID, nextRunStr),
-		Data: map[string]any{
-			"id":            task.ID,
-			"name":          task.Name,
-			"cron_expr":     task.CronExpr,
-			"function_name": task.FunctionName,
-			"description":   task.Description,
-			"next_run_at":   nextRunStr,
-		},
+		Message: fmt.Sprintf("定时任务创建成功（ID: %d），下次触发时间: %s", task.ID, nextRunStr),
+		Data:    data,
 	}, nil
 }
 
@@ -123,13 +134,13 @@ func (f *CronListFunction) Execute(ctx context.Context, params any) (function.Re
 			nextRunStr = task.NextRunAt.Format(time.RFC3339)
 		}
 		taskList[i] = map[string]any{
-			"id":            task.ID,
-			"name":          task.Name,
-			"cron_expr":     task.CronExpr,
-			"function_name": task.FunctionName,
-			"description":   task.Description,
-			"next_run_at":   nextRunStr,
-			"created_at":    task.CreatedAt.Format(time.RFC3339),
+			"id":          task.ID,
+			"name":        task.Name,
+			"cron_expr":   task.CronExpr,
+			"prompt":      task.Prompt,
+			"description": task.Description,
+			"next_run_at": nextRunStr,
+			"created_at":  task.CreatedAt.Format(time.RFC3339),
 		}
 	}
 
@@ -228,15 +239,14 @@ func (f *CronGetFunction) Execute(ctx context.Context, params any) (function.Res
 	}
 
 	data := map[string]any{
-		"id":            task.ID,
-		"name":          task.Name,
-		"cron_expr":     task.CronExpr,
-		"function_name": task.FunctionName,
-		"description":   task.Description,
-		"params":        task.Params,
-		"next_run_at":   nextRunStr,
-		"created_at":    task.CreatedAt.Format(time.RFC3339),
-		"updated_at":    task.UpdatedAt.Format(time.RFC3339),
+		"id":          task.ID,
+		"name":        task.Name,
+		"cron_expr":   task.CronExpr,
+		"prompt":      task.Prompt,
+		"description": task.Description,
+		"next_run_at": nextRunStr,
+		"created_at":  task.CreatedAt.Format(time.RFC3339),
+		"updated_at":  task.UpdatedAt.Format(time.RFC3339),
 	}
 
 	return function.Result{

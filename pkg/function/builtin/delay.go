@@ -13,10 +13,10 @@ import (
 
 // DelayCreateParams 创建延时任务的参数
 type DelayCreateParams struct {
-	Name         string         `json:"name" desc:"任务名称（描述性，可重复）" required:"true"`
-	FunctionName string         `json:"function_name" desc:"要执行的函数名" required:"true"`
-	RunAt        string         `json:"run_at" desc:"执行时间，ISO8601格式，如 2024-01-15T10:30:00+08:00" required:"true"`
-	Params       map[string]any `json:"params" desc:"传递给函数的参数"`
+	Name    string `json:"name" desc:"任务名称（描述性，可重复）" required:"true"`
+	RunAt   string `json:"run_at" desc:"执行时间，ISO8601格式，如 2024-01-15T10:30:00+08:00" required:"true"`
+	Prompt  string `json:"prompt" desc:"任务触发时发送给AI的提示词，AI会根据提示词决定执行什么操作" required:"true"`
+	Channel string `json:"channel" desc:"渠道上下文JSON，如 {\"type\":\"console\"} 或 {\"type\":\"telegram\",\"chat_id\":\"123\"}"`
 }
 
 // DelayCreateFunction 创建延时任务的函数
@@ -34,7 +34,7 @@ func (f *DelayCreateFunction) Name() string {
 }
 
 func (f *DelayCreateFunction) Description() string {
-	return "创建一个延时任务，在指定时间执行指定的函数。执行时间必须是未来时间点（ISO8601格式）。创建成功后返回任务ID。"
+	return "创建一个延时任务，在指定时间触发AI执行任务。执行时间必须是未来时间点（ISO8601格式）。触发时AI会根据prompt决定执行什么操作。创建成功后返回任务ID。"
 }
 
 func (f *DelayCreateFunction) ParamsType() reflect.Type {
@@ -50,23 +50,33 @@ func (f *DelayCreateFunction) Execute(ctx context.Context, params any) (function
 		return function.Result{}, fmt.Errorf("invalid run_at format, expected ISO8601/RFC3339: %v", err)
 	}
 
-	// 创建任务
-	task, err := f.scheduler.CreateTask(p.Name, p.FunctionName, runAt, p.Params)
+	// 构建完整的 prompt（包含渠道信息）
+	fullPrompt := p.Prompt
+	if p.Channel != "" {
+		fullPrompt = fmt.Sprintf("【渠道信息：%s】\n%s", p.Channel, p.Prompt)
+	}
+
+	// 创建任务（传递渠道信息）
+	task, err := f.scheduler.CreateTask(p.Name, runAt, fullPrompt, p.Channel)
 	if err != nil {
 		return function.Result{}, err
 	}
 
+	data := map[string]any{
+		"id":     task.ID,
+		"name":   task.Name,
+		"prompt": task.Prompt,
+		"run_at": task.RunAt.Format(time.RFC3339),
+		"status": task.Status,
+	}
+	if task.Channel != "" {
+		data["channel"] = task.Channel
+	}
+
 	return function.Result{
-		Message: fmt.Sprintf("延时任务创建成功（ID: %d），将在 %s 执行函数 '%s'",
-			task.ID, task.RunAt.Format("2006-01-02 15:04:05"), task.FunctionName),
-		Data: map[string]any{
-			"id":            task.ID,
-			"name":          task.Name,
-			"function_name": task.FunctionName,
-			"run_at":        task.RunAt.Format(time.RFC3339),
-			"status":        task.Status,
-			"params":        p.Params,
-		},
+		Message: fmt.Sprintf("延时任务创建成功（ID: %d），将在 %s 触发AI执行",
+			task.ID, task.RunAt.Format("2006-01-02 15:04:05")),
+		Data: data,
 	}, nil
 }
 
@@ -134,12 +144,12 @@ func (f *DelayListFunction) Execute(ctx context.Context, params any) (function.R
 	taskList := make([]map[string]any, len(tasks))
 	for i, task := range tasks {
 		taskList[i] = map[string]any{
-			"id":            task.ID,
-			"name":          task.Name,
-			"function_name": task.FunctionName,
-			"run_at":        task.RunAt.Format(time.RFC3339),
-			"status":        task.Status,
-			"created_at":    task.CreatedAt.Format(time.RFC3339),
+			"id":         task.ID,
+			"name":       task.Name,
+			"prompt":     task.Prompt,
+			"run_at":     task.RunAt.Format(time.RFC3339),
+			"status":     task.Status,
+			"created_at": task.CreatedAt.Format(time.RFC3339),
 		}
 		if task.ExecutedAt != nil {
 			taskList[i]["executed_at"] = task.ExecutedAt.Format(time.RFC3339)
@@ -244,14 +254,13 @@ func (f *DelayGetFunction) Execute(ctx context.Context, params any) (function.Re
 	}
 
 	data := map[string]any{
-		"id":            task.ID,
-		"name":          task.Name,
-		"function_name": task.FunctionName,
-		"run_at":        task.RunAt.Format(time.RFC3339),
-		"status":        task.Status,
-		"params":        task.Params,
-		"created_at":    task.CreatedAt.Format(time.RFC3339),
-		"updated_at":    task.UpdatedAt.Format(time.RFC3339),
+		"id":         task.ID,
+		"name":       task.Name,
+		"prompt":     task.Prompt,
+		"run_at":     task.RunAt.Format(time.RFC3339),
+		"status":     task.Status,
+		"created_at": task.CreatedAt.Format(time.RFC3339),
+		"updated_at": task.UpdatedAt.Format(time.RFC3339),
 	}
 
 	if task.ExecutedAt != nil {

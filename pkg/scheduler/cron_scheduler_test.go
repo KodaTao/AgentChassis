@@ -2,16 +2,53 @@
 package scheduler
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/KodaTao/AgentChassis/pkg/function"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// MockAgentExecutor 模拟 AgentExecutor
+type MockAgentExecutor struct {
+	mu         sync.Mutex
+	executions []string
+	result     string
+	err        error
+}
+
+func (m *MockAgentExecutor) Execute(ctx context.Context, prompt string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.executions = append(m.executions, prompt)
+	if m.err != nil {
+		return "", m.err
+	}
+	if m.result != "" {
+		return m.result, nil
+	}
+	return "执行完成: " + prompt, nil
+}
+
+func (m *MockAgentExecutor) ExecutionCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.executions)
+}
+
+func (m *MockAgentExecutor) LastPrompt() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.executions) == 0 {
+		return ""
+	}
+	return m.executions[len(m.executions)-1]
+}
 
 // setupCronTestDB 创建 Cron 测试数据库
 func setupCronTestDB(t *testing.T) *gorm.DB {
@@ -31,22 +68,19 @@ func setupCronTestDB(t *testing.T) *gorm.DB {
 }
 
 // setupCronTestScheduler 创建测试调度器
-func setupCronTestScheduler(t *testing.T) (*CronScheduler, *gorm.DB, *function.Registry) {
+func setupCronTestScheduler(t *testing.T) (*CronScheduler, *gorm.DB, *MockAgentExecutor) {
 	db := setupCronTestDB(t)
-	registry := function.NewRegistry()
 	testLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	mockExecutor := &MockAgentExecutor{}
 
-	scheduler := NewCronScheduler(db, registry, testLogger)
-	return scheduler, db, registry
+	scheduler := NewCronScheduler(db, testLogger)
+	scheduler.SetAgentExecutor(mockExecutor)
+	return scheduler, db, mockExecutor
 }
 
 func TestCronScheduler_CreateTask(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	// 启动调度器
 	if err := scheduler.Start(); err != nil {
@@ -54,7 +88,7 @@ func TestCronScheduler_CreateTask(t *testing.T) {
 	}
 
 	// 创建任务（每分钟执行）
-	task, err := scheduler.CreateTask("test_cron", "0 * * * * *", "test_func", map[string]any{"message": "hello"}, "测试任务")
+	task, err := scheduler.CreateTask("test_cron", "0 * * * * *", "请发送一条问候消息", "测试任务")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -66,8 +100,8 @@ func TestCronScheduler_CreateTask(t *testing.T) {
 	if task.CronExpr != "0 * * * * *" {
 		t.Errorf("Expected cron_expr '0 * * * * *', got '%s'", task.CronExpr)
 	}
-	if task.FunctionName != "test_func" {
-		t.Errorf("Expected function_name 'test_func', got '%s'", task.FunctionName)
+	if task.Prompt != "请发送一条问候消息" {
+		t.Errorf("Expected prompt '请发送一条问候消息', got '%s'", task.Prompt)
 	}
 	if task.ID == 0 {
 		t.Error("Expected task to have a valid ID")
@@ -78,25 +112,6 @@ func TestCronScheduler_CreateTask(t *testing.T) {
 }
 
 func TestCronScheduler_CreateTask_InvalidCronExpr(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
-	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
-
-	if err := scheduler.Start(); err != nil {
-		t.Fatalf("Failed to start scheduler: %v", err)
-	}
-
-	// 使用无效的 cron 表达式
-	_, err := scheduler.CreateTask("test_cron", "invalid", "test_func", nil, "")
-	if err == nil {
-		t.Error("Expected error for invalid cron expression")
-	}
-}
-
-func TestCronScheduler_CreateTask_FunctionNotFound(t *testing.T) {
 	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
 
@@ -104,33 +119,44 @@ func TestCronScheduler_CreateTask_FunctionNotFound(t *testing.T) {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
-	// 尝试创建任务，但函数不存在
-	_, err := scheduler.CreateTask("test_cron", "0 * * * * *", "nonexistent_func", nil, "")
+	// 使用无效的 cron 表达式
+	_, err := scheduler.CreateTask("test_cron", "invalid", "测试提示词", "")
 	if err == nil {
-		t.Error("Expected error when function not found")
+		t.Error("Expected error for invalid cron expression")
+	}
+}
+
+func TestCronScheduler_CreateTask_EmptyPrompt(t *testing.T) {
+	scheduler, _, _ := setupCronTestScheduler(t)
+	defer scheduler.Stop()
+
+	if err := scheduler.Start(); err != nil {
+		t.Fatalf("Failed to start scheduler: %v", err)
+	}
+
+	// 尝试创建任务，但 prompt 为空
+	_, err := scheduler.CreateTask("test_cron", "0 * * * * *", "", "")
+	if err == nil {
+		t.Error("Expected error when prompt is empty")
 	}
 }
 
 func TestCronScheduler_CreateTask_DuplicateName(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
 	// 创建第一个任务
-	task1, err := scheduler.CreateTask("test_cron", "0 * * * * *", "test_func", nil, "")
+	task1, err := scheduler.CreateTask("test_cron", "0 * * * * *", "测试提示词1", "")
 	if err != nil {
 		t.Fatalf("Failed to create first task: %v", err)
 	}
 
 	// 创建同名任务（允许重复名称）
-	task2, err := scheduler.CreateTask("test_cron", "30 * * * * *", "test_func", nil, "")
+	task2, err := scheduler.CreateTask("test_cron", "30 * * * * *", "测试提示词2", "")
 	if err != nil {
 		t.Fatalf("Should allow duplicate name, but got error: %v", err)
 	}
@@ -142,19 +168,15 @@ func TestCronScheduler_CreateTask_DuplicateName(t *testing.T) {
 }
 
 func TestCronScheduler_DeleteTask(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
 	// 创建任务
-	task, err := scheduler.CreateTask("test_cron", "0 * * * * *", "test_func", nil, "")
+	task, err := scheduler.CreateTask("test_cron", "0 * * * * *", "测试提示词", "")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -172,19 +194,15 @@ func TestCronScheduler_DeleteTask(t *testing.T) {
 }
 
 func TestCronScheduler_ExecuteTask(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, mockExecutor := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
 	// 创建一个每秒执行的任务
-	task, err := scheduler.CreateTask("test_cron", "* * * * * *", "test_func", nil, "")
+	task, err := scheduler.CreateTask("test_cron", "* * * * * *", "请问候用户", "")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -192,9 +210,14 @@ func TestCronScheduler_ExecuteTask(t *testing.T) {
 	// 等待任务执行
 	time.Sleep(1500 * time.Millisecond)
 
-	// 验证函数被执行
-	if !mockFn.executed {
-		t.Error("Expected function to be executed")
+	// 验证 AgentExecutor 被调用
+	if mockExecutor.ExecutionCount() == 0 {
+		t.Error("Expected AgentExecutor to be called")
+	}
+
+	// 验证执行时传递的 prompt
+	if mockExecutor.LastPrompt() != "请问候用户" {
+		t.Errorf("Expected prompt '请问候用户', got '%s'", mockExecutor.LastPrompt())
 	}
 
 	// 验证执行历史被记录
@@ -211,12 +234,8 @@ func TestCronScheduler_ExecuteTask(t *testing.T) {
 }
 
 func TestCronScheduler_ListTasks(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -225,7 +244,7 @@ func TestCronScheduler_ListTasks(t *testing.T) {
 	// 创建多个任务
 	for i := 0; i < 3; i++ {
 		name := "task_" + string(rune('a'+i))
-		_, err := scheduler.CreateTask(name, "0 * * * * *", "test_func", nil, "")
+		_, err := scheduler.CreateTask(name, "0 * * * * *", "测试提示词", "")
 		if err != nil {
 			t.Fatalf("Failed to create task %s: %v", name, err)
 		}
@@ -242,12 +261,8 @@ func TestCronScheduler_ListTasks(t *testing.T) {
 }
 
 func TestCronScheduler_ListTasks_Pagination(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -256,7 +271,7 @@ func TestCronScheduler_ListTasks_Pagination(t *testing.T) {
 	// 创建5个任务
 	for i := 0; i < 5; i++ {
 		name := "task_" + string(rune('a'+i))
-		_, err := scheduler.CreateTask(name, "0 * * * * *", "test_func", nil, "")
+		_, err := scheduler.CreateTask(name, "0 * * * * *", "测试提示词", "")
 		if err != nil {
 			t.Fatalf("Failed to create task %s: %v", name, err)
 		}
@@ -283,25 +298,22 @@ func TestCronScheduler_ListTasks_Pagination(t *testing.T) {
 
 func TestCronScheduler_RecoverTasks(t *testing.T) {
 	db := setupCronTestDB(t)
-	registry := function.NewRegistry()
 	testLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
+	mockExecutor := &MockAgentExecutor{}
 
 	// 预先创建一个任务（直接写入数据库）
 	task := &CronTask{
-		Name:         "existing_task",
-		CronExpr:     "0 * * * * *",
-		FunctionName: "test_func",
+		Name:     "existing_task",
+		CronExpr: "0 * * * * *",
+		Prompt:   "恢复测试提示词",
 	}
 	if err := db.Create(task).Error; err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// 创建调度器并启动（会触发恢复）
-	scheduler := NewCronScheduler(db, registry, testLogger)
+	scheduler := NewCronScheduler(db, testLogger)
+	scheduler.SetAgentExecutor(mockExecutor)
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
@@ -323,10 +335,10 @@ func TestCronTaskRepository_CRUD(t *testing.T) {
 
 	// Create
 	task := &CronTask{
-		Name:         "test_cron",
-		CronExpr:     "0 * * * * *",
-		FunctionName: "test_func",
-		Description:  "Test task",
+		Name:        "test_cron",
+		CronExpr:    "0 * * * * *",
+		Prompt:      "测试提示词",
+		Description: "Test task",
 	}
 	if err := repo.Create(task); err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -368,9 +380,9 @@ func TestCronExecutionRepository_CRUD(t *testing.T) {
 
 	// 先创建一个任务
 	task := &CronTask{
-		Name:         "test_cron",
-		CronExpr:     "0 * * * * *",
-		FunctionName: "test_func",
+		Name:     "test_cron",
+		CronExpr: "0 * * * * *",
+		Prompt:   "测试提示词",
 	}
 	_ = taskRepo.Create(task)
 
@@ -437,19 +449,15 @@ func TestCronExecutionRepository_CRUD(t *testing.T) {
 }
 
 func TestCronScheduler_SecondLevelPrecision(t *testing.T) {
-	scheduler, _, registry := setupCronTestScheduler(t)
+	scheduler, _, _ := setupCronTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
 	// 创建一个每5秒执行的任务（使用秒级表达式）
-	task, err := scheduler.CreateTask("test_cron", "*/5 * * * * *", "test_func", nil, "每5秒执行")
+	task, err := scheduler.CreateTask("test_cron", "*/5 * * * * *", "每5秒执行的提示词", "每5秒执行")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}

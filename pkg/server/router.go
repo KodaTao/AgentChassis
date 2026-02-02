@@ -200,10 +200,9 @@ func (s *Server) deleteSession(c *gin.Context) {
 
 // CreateDelayTaskRequest 创建延时任务请求
 type CreateDelayTaskRequest struct {
-	Name         string         `json:"name" binding:"required"`
-	FunctionName string         `json:"function_name" binding:"required"`
-	RunAt        string         `json:"run_at" binding:"required"` // ISO8601 格式
-	Params       map[string]any `json:"params"`
+	Name   string `json:"name" binding:"required"`
+	RunAt  string `json:"run_at" binding:"required"` // ISO8601 格式
+	Prompt string `json:"prompt" binding:"required"` // 触发时发给AI的提示词
 }
 
 // 列出延时任务
@@ -290,7 +289,7 @@ func (s *Server) createDelayTask(c *gin.Context) {
 	}
 
 	// 创建任务
-	task, err := scheduler.CreateTask(req.Name, req.FunctionName, runAt, req.Params)
+	task, err := scheduler.CreateTask(req.Name, runAt, req.Prompt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
@@ -427,11 +426,10 @@ func itoa(n int) string {
 
 // CreateCronTaskRequest 创建定时任务请求
 type CreateCronTaskRequest struct {
-	Name         string         `json:"name" binding:"required"`
-	CronExpr     string         `json:"cron_expr" binding:"required"`
-	FunctionName string         `json:"function_name" binding:"required"`
-	Params       map[string]any `json:"params"`
-	Description  string         `json:"description"`
+	Name        string `json:"name" binding:"required"`
+	CronExpr    string `json:"cron_expr" binding:"required"`
+	Prompt      string `json:"prompt" binding:"required"` // 触发时发给AI的提示词
+	Description string `json:"description"`
 }
 
 // 列出定时任务
@@ -501,7 +499,7 @@ func (s *Server) createCronTask(c *gin.Context) {
 	}
 
 	// 创建任务
-	task, err := scheduler.CreateTask(req.Name, req.CronExpr, req.FunctionName, req.Params, req.Description)
+	task, err := scheduler.CreateTask(req.Name, req.CronExpr, req.Prompt, req.Description)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),

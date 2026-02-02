@@ -57,10 +57,19 @@ func NewAgent(provider llm.Provider, registry *function.Registry, config *AgentC
 	}
 }
 
+// ChannelContext 渠道上下文
+// 用于标识消息来源渠道，任务执行时也会使用此信息进行通知
+type ChannelContext struct {
+	Type   string            `json:"type"`             // 渠道类型: console, telegram, wechat, email...
+	ChatID string            `json:"chat_id,omitempty"` // 聊天ID，如 telegram chat id
+	Extra  map[string]string `json:"extra,omitempty"`   // 其他扩展参数
+}
+
 // ChatRequest 对话请求
 type ChatRequest struct {
-	SessionID string `json:"session_id"`
-	Message   string `json:"message"`
+	SessionID string          `json:"session_id"`
+	Message   string          `json:"message"`
+	Channel   *ChannelContext `json:"channel,omitempty"` // 渠道上下文
 }
 
 // ChatResponse 对话响应

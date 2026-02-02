@@ -3,22 +3,20 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/KodaTao/AgentChassis/pkg/function"
 	"gorm.io/gorm"
 )
 
 // DelayScheduler 延时任务调度器
 type DelayScheduler struct {
-	db       *gorm.DB
-	repo     *DelayTaskRepository
-	registry *function.Registry
-	logger   *slog.Logger
+	db            *gorm.DB
+	repo          *DelayTaskRepository
+	agentExecutor AgentExecutor
+	logger        *slog.Logger
 
 	mu     sync.RWMutex
 	timers map[uint]*time.Timer // 任务ID -> 定时器
@@ -28,18 +26,22 @@ type DelayScheduler struct {
 }
 
 // NewDelayScheduler 创建延时任务调度器
-func NewDelayScheduler(db *gorm.DB, registry *function.Registry, logger *slog.Logger) *DelayScheduler {
+func NewDelayScheduler(db *gorm.DB, logger *slog.Logger) *DelayScheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &DelayScheduler{
-		db:       db,
-		repo:     NewDelayTaskRepository(db),
-		registry: registry,
-		logger:   logger,
-		timers:   make(map[uint]*time.Timer),
-		ctx:      ctx,
-		cancel:   cancel,
+		db:     db,
+		repo:   NewDelayTaskRepository(db),
+		logger: logger,
+		timers: make(map[uint]*time.Timer),
+		ctx:    ctx,
+		cancel: cancel,
 	}
+}
+
+// SetAgentExecutor 设置 Agent 执行器（用于依赖注入，避免循环依赖）
+func (s *DelayScheduler) SetAgentExecutor(executor AgentExecutor) {
+	s.agentExecutor = executor
 }
 
 // Start 启动调度器，恢复待执行的任务
@@ -109,34 +111,29 @@ func (s *DelayScheduler) recoverTasks() error {
 }
 
 // CreateTask 创建并调度延时任务
-func (s *DelayScheduler) CreateTask(name, functionName string, runAt time.Time, params map[string]any) (*DelayTask, error) {
-	// 验证函数是否存在
-	if _, ok := s.registry.Get(functionName); !ok {
-		return nil, fmt.Errorf("function not found: %s", functionName)
-	}
-
+// channel 参数为可选的渠道上下文 JSON 字符串
+func (s *DelayScheduler) CreateTask(name string, runAt time.Time, prompt string, channel ...string) (*DelayTask, error) {
 	// 检查执行时间是否在未来
 	if runAt.Before(time.Now()) {
 		return nil, fmt.Errorf("run_at must be in the future")
 	}
 
-	// 序列化参数
-	paramsJSON := ""
-	if params != nil {
-		data, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal params: %w", err)
-		}
-		paramsJSON = string(data)
+	// 检查 prompt 不能为空
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt cannot be empty")
 	}
 
 	// 创建任务
 	task := &DelayTask{
-		Name:         name,
-		RunAt:        runAt,
-		FunctionName: functionName,
-		Params:       paramsJSON,
-		Status:       StatusPending,
+		Name:   name,
+		RunAt:  runAt,
+		Prompt: prompt,
+		Status: StatusPending,
+	}
+
+	// 设置渠道信息（如果提供）
+	if len(channel) > 0 && channel[0] != "" {
+		task.Channel = channel[0]
 	}
 
 	if err := s.repo.Create(task); err != nil {
@@ -153,7 +150,6 @@ func (s *DelayScheduler) CreateTask(name, functionName string, runAt time.Time, 
 	s.logger.Info("task created and scheduled",
 		"task_id", task.ID,
 		"name", name,
-		"function", functionName,
 		"run_at", runAt,
 	)
 
@@ -223,37 +219,19 @@ func (s *DelayScheduler) executeTask(taskID uint) {
 		return
 	}
 
-	// 获取函数
-	_, ok := s.registry.Get(task.FunctionName)
-	if !ok {
-		errMsg := fmt.Sprintf("function not found: %s", task.FunctionName)
+	// 检查 AgentExecutor 是否已设置
+	if s.agentExecutor == nil {
+		errMsg := "agent executor not set"
 		s.logger.Error(errMsg, "task_id", taskID)
 		_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
 		return
 	}
 
-	// 解析参数
-	var params map[string]any
-	if task.Params != "" {
-		if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
-			errMsg := fmt.Sprintf("failed to unmarshal params: %v", err)
-			s.logger.Error(errMsg, "task_id", taskID)
-			_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
-			return
-		}
-	}
-
-	// 执行函数
+	// 执行：调用 Agent
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
 
-	executor := function.NewExecutor(s.registry, 5*time.Minute)
-	execResp := executor.Execute(ctx, function.ExecuteRequest{
-		FunctionName: task.FunctionName,
-		Params:       convertToStringParams(params),
-	})
-	result := execResp.Result
-	err = execResp.Error
+	result, err := s.agentExecutor.Execute(ctx, task.Prompt)
 
 	// 更新任务状态
 	if err != nil {
@@ -261,9 +239,8 @@ func (s *DelayScheduler) executeTask(taskID uint) {
 		s.logger.Error("task execution failed", "task_id", taskID, "error", errMsg)
 		_ = s.repo.UpdateStatusByID(taskID, StatusFailed, "", errMsg)
 	} else {
-		resultJSON, _ := json.Marshal(result)
-		s.logger.Info("task execution completed", "task_id", taskID, "result", string(resultJSON))
-		_ = s.repo.UpdateStatusByID(taskID, StatusCompleted, string(resultJSON), "")
+		s.logger.Info("task execution completed", "task_id", taskID, "result", result)
+		_ = s.repo.UpdateStatusByID(taskID, StatusCompleted, result, "")
 	}
 
 	// 从定时器映射中移除
@@ -314,16 +291,4 @@ func (s *DelayScheduler) ListPendingTasks() ([]DelayTask, error) {
 // GetRepository 获取 Repository（供外部使用）
 func (s *DelayScheduler) GetRepository() *DelayTaskRepository {
 	return s.repo
-}
-
-// convertToStringParams 将 map[string]any 转换为 map[string]string
-func convertToStringParams(params map[string]any) map[string]string {
-	if params == nil {
-		return nil
-	}
-	result := make(map[string]string, len(params))
-	for k, v := range params {
-		result[k] = fmt.Sprintf("%v", v)
-	}
-	return result
 }

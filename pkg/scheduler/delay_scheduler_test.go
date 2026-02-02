@@ -2,52 +2,15 @@
 package scheduler
 
 import (
-	"context"
 	"log/slog"
 	"os"
-	"reflect"
 	"testing"
 	"time"
 
-	"github.com/KodaTao/AgentChassis/pkg/function"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
-
-// MockParams 测试参数
-type MockParams struct {
-	Message string `json:"message"`
-}
-
-// MockFunction 测试用的 Function
-type MockFunction struct {
-	name        string
-	executed    bool
-	executedAt  time.Time
-	executeFunc func(ctx context.Context, params any) (function.Result, error)
-}
-
-func (f *MockFunction) Name() string {
-	return f.name
-}
-
-func (f *MockFunction) Description() string {
-	return "Test function"
-}
-
-func (f *MockFunction) ParamsType() reflect.Type {
-	return reflect.TypeOf(MockParams{})
-}
-
-func (f *MockFunction) Execute(ctx context.Context, params any) (function.Result, error) {
-	f.executed = true
-	f.executedAt = time.Now()
-	if f.executeFunc != nil {
-		return f.executeFunc(ctx, params)
-	}
-	return function.Result{Message: "executed"}, nil
-}
 
 // setupTestDB 创建测试数据库
 func setupTestDB(t *testing.T) *gorm.DB {
@@ -67,22 +30,19 @@ func setupTestDB(t *testing.T) *gorm.DB {
 }
 
 // setupTestScheduler 创建测试调度器
-func setupTestScheduler(t *testing.T) (*DelayScheduler, *gorm.DB, *function.Registry) {
+func setupTestScheduler(t *testing.T) (*DelayScheduler, *gorm.DB, *MockAgentExecutor) {
 	db := setupTestDB(t)
-	registry := function.NewRegistry()
 	testLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	mockExecutor := &MockAgentExecutor{}
 
-	scheduler := NewDelayScheduler(db, registry, testLogger)
-	return scheduler, db, registry
+	scheduler := NewDelayScheduler(db, testLogger)
+	scheduler.SetAgentExecutor(mockExecutor)
+	return scheduler, db, mockExecutor
 }
 
 func TestDelayScheduler_CreateTask(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	// 启动调度器
 	if err := scheduler.Start(); err != nil {
@@ -91,7 +51,7 @@ func TestDelayScheduler_CreateTask(t *testing.T) {
 
 	// 创建任务
 	runAt := time.Now().Add(1 * time.Hour)
-	task, err := scheduler.CreateTask("test_task", "test_func", runAt, map[string]any{"message": "hello"})
+	task, err := scheduler.CreateTask("test_task", runAt, "请发送一条问候消息")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -100,8 +60,8 @@ func TestDelayScheduler_CreateTask(t *testing.T) {
 	if task.Name != "test_task" {
 		t.Errorf("Expected name 'test_task', got '%s'", task.Name)
 	}
-	if task.FunctionName != "test_func" {
-		t.Errorf("Expected function_name 'test_func', got '%s'", task.FunctionName)
+	if task.Prompt != "请发送一条问候消息" {
+		t.Errorf("Expected prompt '请发送一条问候消息', got '%s'", task.Prompt)
 	}
 	if task.Status != StatusPending {
 		t.Errorf("Expected status 'pending', got '%s'", task.Status)
@@ -111,7 +71,7 @@ func TestDelayScheduler_CreateTask(t *testing.T) {
 	}
 }
 
-func TestDelayScheduler_CreateTask_FunctionNotFound(t *testing.T) {
+func TestDelayScheduler_CreateTask_EmptyPrompt(t *testing.T) {
 	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
 
@@ -119,21 +79,17 @@ func TestDelayScheduler_CreateTask_FunctionNotFound(t *testing.T) {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
 
-	// 尝试创建任务，但函数不存在
+	// 尝试创建任务，但 prompt 为空
 	runAt := time.Now().Add(1 * time.Hour)
-	_, err := scheduler.CreateTask("test_task", "nonexistent_func", runAt, nil)
+	_, err := scheduler.CreateTask("test_task", runAt, "")
 	if err == nil {
-		t.Error("Expected error when function not found")
+		t.Error("Expected error when prompt is empty")
 	}
 }
 
 func TestDelayScheduler_CreateTask_PastTime(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -141,19 +97,15 @@ func TestDelayScheduler_CreateTask_PastTime(t *testing.T) {
 
 	// 尝试创建过去时间的任务
 	runAt := time.Now().Add(-1 * time.Hour)
-	_, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	_, err := scheduler.CreateTask("test_task", runAt, "测试提示词")
 	if err == nil {
 		t.Error("Expected error when run_at is in the past")
 	}
 }
 
 func TestDelayScheduler_CreateTask_DuplicateName(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -161,13 +113,13 @@ func TestDelayScheduler_CreateTask_DuplicateName(t *testing.T) {
 
 	// 创建第一个任务
 	runAt := time.Now().Add(1 * time.Hour)
-	task1, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task1, err := scheduler.CreateTask("test_task", runAt, "测试提示词1")
 	if err != nil {
 		t.Fatalf("Failed to create first task: %v", err)
 	}
 
 	// 创建同名任务（现在应该成功，因为允许重复名称）
-	task2, err := scheduler.CreateTask("test_task", "test_func", runAt.Add(time.Hour), nil)
+	task2, err := scheduler.CreateTask("test_task", runAt.Add(time.Hour), "测试提示词2")
 	if err != nil {
 		t.Fatalf("Should allow duplicate name, but got error: %v", err)
 	}
@@ -179,12 +131,8 @@ func TestDelayScheduler_CreateTask_DuplicateName(t *testing.T) {
 }
 
 func TestDelayScheduler_CancelTaskByID(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -192,7 +140,7 @@ func TestDelayScheduler_CancelTaskByID(t *testing.T) {
 
 	// 创建任务
 	runAt := time.Now().Add(1 * time.Hour)
-	task, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task, err := scheduler.CreateTask("test_task", runAt, "测试提示词")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -213,12 +161,8 @@ func TestDelayScheduler_CancelTaskByID(t *testing.T) {
 }
 
 func TestDelayScheduler_ExecuteTask(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, mockExecutor := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -226,7 +170,7 @@ func TestDelayScheduler_ExecuteTask(t *testing.T) {
 
 	// 创建一个马上执行的任务
 	runAt := time.Now().Add(100 * time.Millisecond)
-	task, err := scheduler.CreateTask("test_task", "test_func", runAt, nil)
+	task, err := scheduler.CreateTask("test_task", runAt, "请问候用户")
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -234,9 +178,14 @@ func TestDelayScheduler_ExecuteTask(t *testing.T) {
 	// 等待任务执行
 	time.Sleep(500 * time.Millisecond)
 
-	// 验证函数被执行
-	if !mockFn.executed {
-		t.Error("Expected function to be executed")
+	// 验证 AgentExecutor 被调用
+	if mockExecutor.ExecutionCount() == 0 {
+		t.Error("Expected AgentExecutor to be called")
+	}
+
+	// 验证执行时传递的 prompt
+	if mockExecutor.LastPrompt() != "请问候用户" {
+		t.Errorf("Expected prompt '请问候用户', got '%s'", mockExecutor.LastPrompt())
 	}
 
 	// 验证状态变为 completed
@@ -250,12 +199,8 @@ func TestDelayScheduler_ExecuteTask(t *testing.T) {
 }
 
 func TestDelayScheduler_ListTasks(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -265,7 +210,7 @@ func TestDelayScheduler_ListTasks(t *testing.T) {
 	runAt := time.Now().Add(1 * time.Hour)
 	for i := 0; i < 3; i++ {
 		name := "task_" + string(rune('a'+i))
-		_, err := scheduler.CreateTask(name, "test_func", runAt.Add(time.Duration(i)*time.Minute), nil)
+		_, err := scheduler.CreateTask(name, runAt.Add(time.Duration(i)*time.Minute), "测试提示词")
 		if err != nil {
 			t.Fatalf("Failed to create task %s: %v", name, err)
 		}
@@ -292,12 +237,8 @@ func TestDelayScheduler_ListTasks(t *testing.T) {
 }
 
 func TestDelayScheduler_ListTasks_Pagination(t *testing.T) {
-	scheduler, _, registry := setupTestScheduler(t)
+	scheduler, _, _ := setupTestScheduler(t)
 	defer scheduler.Stop()
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
 
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
@@ -307,7 +248,7 @@ func TestDelayScheduler_ListTasks_Pagination(t *testing.T) {
 	runAt := time.Now().Add(1 * time.Hour)
 	for i := 0; i < 5; i++ {
 		name := "task_" + string(rune('a'+i))
-		_, err := scheduler.CreateTask(name, "test_func", runAt.Add(time.Duration(i)*time.Minute), nil)
+		_, err := scheduler.CreateTask(name, runAt.Add(time.Duration(i)*time.Minute), "测试提示词")
 		if err != nil {
 			t.Fatalf("Failed to create task %s: %v", name, err)
 		}
@@ -352,19 +293,15 @@ func TestDelayScheduler_ListTasks_Pagination(t *testing.T) {
 
 func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	db := setupTestDB(t)
-	registry := function.NewRegistry()
 	testLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	// 注册测试函数
-	mockFn := &MockFunction{name: "test_func"}
-	_ = registry.Register(mockFn)
+	mockExecutor := &MockAgentExecutor{}
 
 	// 预先创建一个过期任务
 	expiredTask := &DelayTask{
-		Name:         "expired_task",
-		FunctionName: "test_func",
-		RunAt:        time.Now().Add(-1 * time.Hour), // 过去 1 小时
-		Status:       StatusPending,
+		Name:   "expired_task",
+		Prompt: "过期任务提示词",
+		RunAt:  time.Now().Add(-1 * time.Hour), // 过去 1 小时
+		Status: StatusPending,
 	}
 	if err := db.Create(expiredTask).Error; err != nil {
 		t.Fatalf("Failed to create expired task: %v", err)
@@ -373,10 +310,10 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 
 	// 预先创建一个未过期任务
 	futureTask := &DelayTask{
-		Name:         "future_task",
-		FunctionName: "test_func",
-		RunAt:        time.Now().Add(1 * time.Hour), // 未来 1 小时
-		Status:       StatusPending,
+		Name:   "future_task",
+		Prompt: "未来任务提示词",
+		RunAt:  time.Now().Add(1 * time.Hour), // 未来 1 小时
+		Status: StatusPending,
 	}
 	if err := db.Create(futureTask).Error; err != nil {
 		t.Fatalf("Failed to create future task: %v", err)
@@ -384,7 +321,8 @@ func TestDelayScheduler_RecoverTasks(t *testing.T) {
 	futureID := futureTask.ID
 
 	// 创建调度器并启动（会触发恢复）
-	scheduler := NewDelayScheduler(db, registry, testLogger)
+	scheduler := NewDelayScheduler(db, testLogger)
+	scheduler.SetAgentExecutor(mockExecutor)
 	if err := scheduler.Start(); err != nil {
 		t.Fatalf("Failed to start scheduler: %v", err)
 	}
@@ -415,10 +353,10 @@ func TestRepository_CRUD(t *testing.T) {
 
 	// Create
 	task := &DelayTask{
-		Name:         "test_task",
-		FunctionName: "test_func",
-		RunAt:        time.Now().Add(1 * time.Hour),
-		Status:       StatusPending,
+		Name:   "test_task",
+		Prompt: "测试提示词",
+		RunAt:  time.Now().Add(1 * time.Hour),
+		Status: StatusPending,
 	}
 	if err := repo.Create(task); err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -468,10 +406,10 @@ func TestRepository_CancelByID(t *testing.T) {
 
 	// 创建 pending 任务
 	task := &DelayTask{
-		Name:         "test_task",
-		FunctionName: "test_func",
-		RunAt:        time.Now().Add(1 * time.Hour),
-		Status:       StatusPending,
+		Name:   "test_task",
+		Prompt: "测试提示词",
+		RunAt:  time.Now().Add(1 * time.Hour),
+		Status: StatusPending,
 	}
 	_ = repo.Create(task)
 
@@ -499,9 +437,9 @@ func TestRepository_List(t *testing.T) {
 
 	// 创建多个不同状态的任务
 	tasks := []DelayTask{
-		{Name: "task1", FunctionName: "f1", RunAt: time.Now().Add(1 * time.Hour), Status: StatusPending},
-		{Name: "task2", FunctionName: "f2", RunAt: time.Now().Add(2 * time.Hour), Status: StatusPending},
-		{Name: "task3", FunctionName: "f3", RunAt: time.Now().Add(3 * time.Hour), Status: StatusCompleted},
+		{Name: "task1", Prompt: "prompt1", RunAt: time.Now().Add(1 * time.Hour), Status: StatusPending},
+		{Name: "task2", Prompt: "prompt2", RunAt: time.Now().Add(2 * time.Hour), Status: StatusPending},
+		{Name: "task3", Prompt: "prompt3", RunAt: time.Now().Add(3 * time.Hour), Status: StatusCompleted},
 	}
 	for i := range tasks {
 		_ = repo.Create(&tasks[i])

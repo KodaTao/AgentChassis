@@ -106,18 +106,18 @@ func (a *App) Initialize() error {
 		"api_key", llm.MaskAPIKey(apiKey),
 	)
 
-	// 4. 初始化 DelayScheduler
+	// 4. 初始化 DelayScheduler（此时还没有 AgentExecutor，后续设置）
 	db := storage.GetDB()
 	logger := slog.Default()
-	a.delayScheduler = scheduler.NewDelayScheduler(db, a.registry, logger)
+	a.delayScheduler = scheduler.NewDelayScheduler(db, logger)
 	if err := a.delayScheduler.Start(); err != nil {
 		return fmt.Errorf("failed to start delay scheduler: %w", err)
 	}
 
 	observability.Info("DelayScheduler started")
 
-	// 5. 初始化 CronScheduler
-	a.cronScheduler = scheduler.NewCronScheduler(db, a.registry, logger)
+	// 5. 初始化 CronScheduler（此时还没有 AgentExecutor，后续设置）
+	a.cronScheduler = scheduler.NewCronScheduler(db, logger)
 	if err := a.cronScheduler.Start(); err != nil {
 		return fmt.Errorf("failed to start cron scheduler: %w", err)
 	}
@@ -129,6 +129,14 @@ func (a *App) Initialize() error {
 
 	// 7. 创建 Agent
 	a.agent = NewAgent(a.provider, a.registry, nil)
+
+	// 8. 设置 AgentExecutor 到调度器（解决循环依赖）
+	// Agent 创建完成后，将其适配为 AgentExecutor 并注入到调度器
+	executor := NewAgentExecutorAdapter(a.agent)
+	a.delayScheduler.SetAgentExecutor(executor)
+	a.cronScheduler.SetAgentExecutor(executor)
+
+	observability.Info("AgentExecutor injected to schedulers")
 
 	observability.Info("AgentChassis initialized",
 		"registered_functions", a.registry.Count(),

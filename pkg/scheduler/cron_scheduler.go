@@ -3,24 +3,22 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/KodaTao/AgentChassis/pkg/function"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
 // CronScheduler Cron 定时任务调度器
 type CronScheduler struct {
-	db       *gorm.DB
-	taskRepo *CronTaskRepository
-	execRepo *CronExecutionRepository
-	registry *function.Registry
-	logger   *slog.Logger
+	db            *gorm.DB
+	taskRepo      *CronTaskRepository
+	execRepo      *CronExecutionRepository
+	agentExecutor AgentExecutor
+	logger        *slog.Logger
 
 	cron     *cron.Cron
 	mu       sync.RWMutex
@@ -31,7 +29,7 @@ type CronScheduler struct {
 }
 
 // NewCronScheduler 创建 Cron 调度器
-func NewCronScheduler(db *gorm.DB, registry *function.Registry, logger *slog.Logger) *CronScheduler {
+func NewCronScheduler(db *gorm.DB, logger *slog.Logger) *CronScheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// 创建支持秒级的 cron 调度器（6 字段格式）
@@ -41,13 +39,17 @@ func NewCronScheduler(db *gorm.DB, registry *function.Registry, logger *slog.Log
 		db:       db,
 		taskRepo: NewCronTaskRepository(db),
 		execRepo: NewCronExecutionRepository(db),
-		registry: registry,
 		logger:   logger,
 		cron:     c,
 		entryMap: make(map[uint]cron.EntryID),
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+}
+
+// SetAgentExecutor 设置 Agent 执行器（用于依赖注入，避免循环依赖）
+func (s *CronScheduler) SetAgentExecutor(executor AgentExecutor) {
+	s.agentExecutor = executor
 }
 
 // Start 启动调度器
@@ -108,7 +110,8 @@ func (s *CronScheduler) recoverTasks() error {
 }
 
 // CreateTask 创建定时任务
-func (s *CronScheduler) CreateTask(name, cronExpr, functionName string, params map[string]any, description string) (*CronTask, error) {
+// channel 参数为可选的渠道上下文 JSON 字符串
+func (s *CronScheduler) CreateTask(name, cronExpr, prompt, description string, channel ...string) (*CronTask, error) {
 	// 验证 cron 表达式
 	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	schedule, err := parser.Parse(cronExpr)
@@ -116,19 +119,9 @@ func (s *CronScheduler) CreateTask(name, cronExpr, functionName string, params m
 		return nil, fmt.Errorf("invalid cron expression: %w", err)
 	}
 
-	// 验证函数是否存在
-	if _, ok := s.registry.Get(functionName); !ok {
-		return nil, fmt.Errorf("function not found: %s", functionName)
-	}
-
-	// 序列化参数
-	paramsJSON := ""
-	if params != nil {
-		data, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal params: %w", err)
-		}
-		paramsJSON = string(data)
+	// 检查 prompt 不能为空
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt cannot be empty")
 	}
 
 	// 计算下次执行时间
@@ -136,12 +129,16 @@ func (s *CronScheduler) CreateTask(name, cronExpr, functionName string, params m
 
 	// 创建任务
 	task := &CronTask{
-		Name:         name,
-		CronExpr:     cronExpr,
-		FunctionName: functionName,
-		Params:       paramsJSON,
-		Description:  description,
-		NextRunAt:    &nextRun,
+		Name:        name,
+		CronExpr:    cronExpr,
+		Prompt:      prompt,
+		Description: description,
+		NextRunAt:   &nextRun,
+	}
+
+	// 设置渠道信息（如果提供）
+	if len(channel) > 0 && channel[0] != "" {
+		task.Channel = channel[0]
 	}
 
 	if err := s.taskRepo.Create(task); err != nil {
@@ -159,7 +156,6 @@ func (s *CronScheduler) CreateTask(name, cronExpr, functionName string, params m
 		"task_id", task.ID,
 		"name", name,
 		"cron_expr", cronExpr,
-		"function", functionName,
 		"next_run", nextRun,
 	)
 
@@ -236,37 +232,19 @@ func (s *CronScheduler) executeTask(taskID uint) {
 		// 继续执行，只是没有记录
 	}
 
-	// 获取函数
-	_, ok := s.registry.Get(task.FunctionName)
-	if !ok {
-		errMsg := fmt.Sprintf("function not found: %s", task.FunctionName)
+	// 检查 AgentExecutor 是否已设置
+	if s.agentExecutor == nil {
+		errMsg := "agent executor not set"
 		s.logger.Error(errMsg, "task_id", taskID)
 		s.finishExecution(exec, CronStatusFailed, "", errMsg)
 		return
 	}
 
-	// 解析参数
-	var params map[string]any
-	if task.Params != "" {
-		if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
-			errMsg := fmt.Sprintf("failed to unmarshal params: %v", err)
-			s.logger.Error(errMsg, "task_id", taskID)
-			s.finishExecution(exec, CronStatusFailed, "", errMsg)
-			return
-		}
-	}
-
-	// 执行函数
+	// 执行：调用 Agent
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
 
-	executor := function.NewExecutor(s.registry, 5*time.Minute)
-	execResp := executor.Execute(ctx, function.ExecuteRequest{
-		FunctionName: task.FunctionName,
-		Params:       convertToStringParams(params),
-	})
-	result := execResp.Result
-	execErr := execResp.Error
+	result, execErr := s.agentExecutor.Execute(ctx, task.Prompt)
 
 	// 更新执行记录
 	if execErr != nil {
@@ -274,9 +252,8 @@ func (s *CronScheduler) executeTask(taskID uint) {
 		s.logger.Error("cron task execution failed", "task_id", taskID, "error", errMsg)
 		s.finishExecution(exec, CronStatusFailed, "", errMsg)
 	} else {
-		resultJSON, _ := json.Marshal(result)
-		s.logger.Info("cron task execution completed", "task_id", taskID, "result", string(resultJSON))
-		s.finishExecution(exec, CronStatusCompleted, string(resultJSON), "")
+		s.logger.Info("cron task execution completed", "task_id", taskID, "result", result)
+		s.finishExecution(exec, CronStatusCompleted, result, "")
 	}
 
 	// 更新下次执行时间

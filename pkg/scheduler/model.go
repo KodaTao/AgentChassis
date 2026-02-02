@@ -22,14 +22,14 @@ const (
 // DelayTask 一次性延时任务
 type DelayTask struct {
 	gorm.Model
-	Name         string     `gorm:"not null" json:"name"`                      // 任务名称（描述性，可重复）
-	RunAt        time.Time  `gorm:"not null;index" json:"run_at"`              // 执行时间点（绝对时间）
-	FunctionName string     `gorm:"not null" json:"function_name"`             // 要执行的函数名
-	Params       string     `gorm:"type:text" json:"params,omitempty"`         // 函数参数（JSON 格式）
-	Status       TaskStatus `gorm:"default:pending;index" json:"status"`       // 任务状态
-	Result       string     `gorm:"type:text" json:"result,omitempty"`         // 执行结果
-	Error        string     `gorm:"type:text" json:"error,omitempty"`          // 错误信息
-	ExecutedAt   *time.Time `json:"executed_at,omitempty"`                     // 实际执行时间
+	Name       string     `gorm:"not null" json:"name"`                // 任务名称（描述性，可重复）
+	RunAt      time.Time  `gorm:"not null;index" json:"run_at"`        // 执行时间点（绝对时间）
+	Prompt     string     `gorm:"type:text;not null" json:"prompt"`    // 触发时发给 LLM 的提示词
+	Channel    string     `gorm:"type:text" json:"channel,omitempty"`  // 渠道上下文（JSON 格式存储）
+	Status     TaskStatus `gorm:"default:pending;index" json:"status"` // 任务状态
+	Result     string     `gorm:"type:text" json:"result,omitempty"`   // LLM 最终回复
+	Error      string     `gorm:"type:text" json:"error,omitempty"`    // 错误信息
+	ExecutedAt *time.Time `json:"executed_at,omitempty"`               // 实际执行时间
 }
 
 // TableName 指定表名
@@ -60,12 +60,12 @@ func (t *DelayTask) TimeUntilRun() time.Duration {
 // CronTask 重复性定时任务
 type CronTask struct {
 	gorm.Model
-	Name         string `gorm:"not null" json:"name"`                // 任务名称（描述性，可重复）
-	CronExpr     string `gorm:"not null" json:"cron_expr"`           // Cron 表达式（6字段，支持秒级）
-	FunctionName string `gorm:"not null" json:"function_name"`       // 要执行的函数名
-	Params       string `gorm:"type:text" json:"params,omitempty"`   // 函数参数（JSON 格式）
-	Description  string `gorm:"type:text" json:"description"`        // 任务描述
-	NextRunAt    *time.Time `json:"next_run_at,omitempty"`           // 下次执行时间
+	Name        string     `gorm:"not null" json:"name"`              // 任务名称（描述性，可重复）
+	CronExpr    string     `gorm:"not null" json:"cron_expr"`         // Cron 表达式（6字段，支持秒级）
+	Prompt      string     `gorm:"type:text;not null" json:"prompt"`  // 触发时发给 LLM 的提示词
+	Channel     string     `gorm:"type:text" json:"channel,omitempty"` // 渠道上下文（JSON 格式存储）
+	Description string     `gorm:"type:text" json:"description"`      // 任务描述
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"`             // 下次执行时间
 }
 
 // TableName 指定表名
@@ -90,7 +90,7 @@ type CronExecution struct {
 	StartedAt   time.Time           `gorm:"not null" json:"started_at"`         // 开始执行时间
 	FinishedAt  *time.Time          `json:"finished_at,omitempty"`              // 结束时间
 	Status      CronExecutionStatus `gorm:"not null;index" json:"status"`       // 执行状态
-	Result      string              `gorm:"type:text" json:"result,omitempty"`  // 执行结果
+	Result      string              `gorm:"type:text" json:"result,omitempty"`  // LLM 最终回复
 	Error       string              `gorm:"type:text" json:"error,omitempty"`   // 错误信息
 	Duration    int64               `json:"duration_ms,omitempty"`              // 执行耗时（毫秒）
 }
