@@ -27,7 +27,7 @@ func NewSender(bot *tgbotapi.BotAPI, logger *slog.Logger) *Sender {
 func (s *Sender) SendReply(chatID int64, replyToMsgID int, text string) (int, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyToMessageID = replyToMsgID
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
 
 	sent, err := s.bot.Send(msg)
 	if err != nil {
@@ -60,7 +60,7 @@ func (s *Sender) SendReply(chatID int64, replyToMsgID int, text string) (int, er
 // 用于任务触发时的通知
 func (s *Sender) SendMessage(chatID int64, text string) (int, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
 
 	sent, err := s.bot.Send(msg)
 	if err != nil {

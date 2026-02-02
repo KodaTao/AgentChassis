@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -81,6 +82,12 @@ func (b *Bot) Start() {
 				return
 			case update := <-updates:
 				if update.Message != nil {
+					if update.Message.Chat.IsGroup() || update.Message.Chat.IsChannel() {
+						// 群聊必须@才生效
+						if !strings.Contains(update.Message.Text, "@"+b.api.Self.UserName+" ") {
+							continue
+						}
+					}
 					go b.handleMessage(update.Message)
 				}
 			}
